@@ -66,7 +66,7 @@ WAITING_FOR_SECOND_TEST = 5  # Новое состояние для ожидан
 WAITING_FOR_ADMIN_RESPONSE = 6
 
 # Создаём клиента OpenAI
-client = OpenAI()
+# client = OpenAI()
 
 def init_database():
     """
@@ -248,10 +248,44 @@ async def start(update: Update, context: CallbackContext) -> int:
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
-    await update.message.reply_text(
-        "Привет! Хотите узнать, какие преимущества даёт переход на Тиер 2?",
-        reply_markup=reply_markup
+    welcome_message = (
+        "*Enter Tier 2* \\- это программа перехода на второй уровень сознания по модели Спиральная Динамика\\.\n\n"
+        "Один из авторов модели Клэр Грейвз описывал переход на Tier 2 как фундаментальный сдвиг в сознании\\, "
+        "который меняет сам способ мышления\\.\n\n"
+        "Если уровни Tier 1 по сути спорят между собой и борются за свою картину мира\\, "
+        "на Tier 2 человек впервые начинает видеть систему целиком и понимать ценность всех предыдущих стадий\\.\n\n"
+        "Менее 1\\% людей находятся на этом уровне\\. Хотите узнать\\, что дает переход на второй уровень сознания?"
     )
+    
+    # Путь к изображению
+    image_path = "images/tier2_logo.jpg"
+    
+    try:
+        # Проверяем, существует ли файл
+        if os.path.exists(image_path):
+            # Отправляем одно сообщение с картинкой и текстом
+            await update.message.reply_photo(
+                photo=open(image_path, 'rb'),
+                caption=welcome_message,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        else:
+            logging.warning(f"Изображение не найдено: {image_path}")
+            # Если изображение не найдено, отправляем только текст
+            await update.message.reply_text(
+                welcome_message,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+    except Exception as e:
+        logging.error(f"Ошибка при отправке сообщения с изображением: {e}")
+        # В случае ошибки отправляем только текст
+        await update.message.reply_text(
+            welcome_message,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
     
     return WAITING_FOR_BENEFITS_CHOICE
 
@@ -262,33 +296,41 @@ async def handle_benefits_choice(update: Update, context: CallbackContext) -> in
     choice = update.message.text
     logging.info(f"Получен ответ от пользователя: {choice}")
     
-    if choice == "Да, пожалуйста":
-        logging.info("Пользователь выбрал 'Да, пожалуйста'")
-        benefits_message = (
-            "*Что даёт переход на Тиер 2:*\n\n"
-            "1\\. Ясность мышления \\- вы начинаете видеть ситуации с разных сторон\n\n"
-            "2\\. Гибкость \\- вы легко адаптируетесь к изменениям\n\n"
-            "3\\. Принятие неопределенности \\- вы не боитесь неизвестного\n\n"
-            "4\\. Эмоциональная зрелость \\- вы управляете своими реакциями\n\n"
-            "5\\. Глубокие отношения \\- вы строите настоящие связи\n\n"
-            "6\\. Осознанные решения \\- вы делаете выбор на основе понимания\n\n"
-            "7\\. Внутренняя свобода \\- вы не зависите от мнения других\n\n"
-            "8\\. Системное мышление \\- вы видите взаимосвязи\n\n"
-            "9\\. Личностный рост \\- вы постоянно развиваетесь\n\n"
-            "_Это не просто новый уровень мышления \\- это более осознанная и наполненная жизнь_"
-        )
-        
-        keyboard = [
-            ["📝 Пройти тест", "Нет, спасибо"]
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        
-        await update.message.reply_text(
-            benefits_message + "\n\nДля участия в программе вам надо пройти два теста\\. Начать первый?",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup
-        )
-        return WAITING_FOR_TEST_CHOICE
+    if choice == "Да, пожалуйста" or choice == "📝 Пройти тест":
+        if choice == "Да, пожалуйста":
+            logging.info("Пользователь выбрал 'Да, пожалуйста'")
+            benefits_message = (
+                "*Основные преимущества Тиер 2:*\n\n"
+                "• *Разрыв с борьбой Тиер 1*\n"
+                "Человек перестаёт воспринимать свою текущую систему ценностей как единственно верную и не хочет воевать с другими\\. "
+                "Он понимает\\, что каждый уровень имеет своё место и смысл\\.\n\n"
+                "• *Гибкость и адаптивность*\n"
+                "Вместо привязанности к конкретной идеологии или технике человек начинает свободно использовать инструменты из разных мировоззрений\\, "
+                "исходя из ситуации\\.\n\n"
+                "• *Системное мышление*\n"
+                "Восприятие становится более сложным: человек видит взаимосвязи и динамику развития систем\\, "
+                "а не просто «правильные» и «неправильные» вещи\\.\n\n"
+                "• *Автономность*\n"
+                "Он больше не нуждается в комьюнити или внешнем подтверждении своих взглядов\\, но и не противопоставляет себя обществу\\.\n\n"
+                "• *Изменение мотивации*\n"
+                "Человек не ищет удовольствий ради удовольствий или просветления ради просветления\\. "
+                "Он действует\\, исходя из более глубокого понимания себя и мира\\.\n\n"
+                "> _\"Клэр Грейвз описывал переход в Тиер 2 как фундаментальный сдвиг в сознании\\, который меняет сам способ мышления\\\"_\n\n"
+            )
+            
+            keyboard = [
+                ["📝 Пройти тест", "Нет, спасибо"]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
+            await update.message.reply_text(
+                benefits_message + "\n\n" + "Мы принимаем людей в программу только по результатам двух тестов и оставляем за собой право отказать в участии\\, если посчитаем\\, что вы не готовы\\. Начать первый тест?",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=reply_markup
+            )
+            return WAITING_FOR_TEST_CHOICE
+        else:
+            return await start_test(update, context)
     else:
         await update.message.reply_text(
             "Спасибо за интерес! Если захотите узнать больше, просто нажмите /start",
@@ -314,10 +356,8 @@ async def start_test(update: Update, context: CallbackContext) -> int:
         # Форматируем вопрос и получаем маппинг ответов
         formatted_text, letter_to_number, keyboard_letters = format_question_with_options(question, current_question)
         
-        # Создаем клавиатуру с буквами ответов по 2 в ряд
-        keyboard = [keyboard_letters[i:i+2] for i in range(0, 4, 2)]
-        keyboard.append(["Отменить"])
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        # Создаем клавиатуру с вариантами ответов по 2 в ряд
+        keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
         
         # Сохраняем начальное состояние с маппингом
         save_user_progress(user_id, {
@@ -331,12 +371,12 @@ async def start_test(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text(
             formatted_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return ANSWERING_QUESTIONS
     else:
         await update.message.reply_text(
-            "Спасибо за интерес! Если захотите пройти тест позже, просто нажмите /start",
+            "Спасибо за интерес! Если захотите пройти тест, просто нажмите /start",
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
@@ -368,15 +408,17 @@ async def handle_continue_choice(update: Update, context: CallbackContext) -> in
         question = ALL_QUESTIONS[current_question]
         
         # Создаем клавиатуру с вариантами ответов
-        keyboard = [[answer] for answer in question["answers"]]
-        keyboard.append(["Отменить"])
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        keyboard = []
+        for letter in keyboard_letters:
+            keyboard.append([letter])
+        # Убираем кнопку "Отменить"
+        # keyboard.append(["Отменить"])
         
         # Отправляем вопрос пользователю
         await update.message.reply_text(
             f"{current_question + 1}. {question['text']}\n\n"
             "Выберите один из вариантов:",
-            reply_markup=reply_markup
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return ANSWERING_QUESTIONS
     else:
@@ -442,10 +484,8 @@ async def handle_answer(update: Update, context: CallbackContext) -> int:
         # Форматируем следующий вопрос и получаем новый маппинг
         formatted_text, letter_to_number, keyboard_letters = format_question_with_options(question, current_question)
         
-        # Создаем клавиатуру с буквами ответов по 2 в ряд
-        keyboard = [keyboard_letters[i:i+2] for i in range(0, 4, 2)]
-        keyboard.append(["Отменить"])
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        # Создаем клавиатуру с вариантами ответов по 2 в ряд
+        keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
         
         # Сохраняем прогресс с новым маппингом
         save_user_progress(user_id, {
@@ -459,7 +499,7 @@ async def handle_answer(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text(
             formatted_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return ANSWERING_QUESTIONS
 
@@ -620,20 +660,24 @@ async def finish_test(update: Update, context: CallbackContext) -> int:
             "и отправьте его сюда\\."
         )
         
-        keyboard = [["Отменить"]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        
+        # Отправляем сообщение с результатами
         await update.message.reply_text(
             results_message,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=reply_markup,
+            reply_markup=ReplyKeyboardRemove(),
             disable_web_page_preview=True
         )
         
-        return WAITING_FOR_SECOND_TEST
+        # Обновляем статус теста
+        update_test_status(user_id, "completed_first_test")
         
+        return WAITING_FOR_SECOND_TEST
     except Exception as e:
         logging.error(f"Ошибка при завершении теста: {str(e)}")
+        await update.message.reply_text(
+            "Произошла ошибка при обработке результатов теста. Пожалуйста, попробуйте еще раз с помощью /start",
+            reply_markup=ReplyKeyboardRemove()
+        )
         return ConversationHandler.END
 
 async def handle_second_test_results(update: Update, context: CallbackContext) -> int:
@@ -641,28 +685,38 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
     Обрабатывает получение скриншота со вторым тестом
     """
     try:
-        if not update.message.photo:
+        # Проверяем, отправил ли пользователь фото или документ
+        photo_file = None
+        
+        if update.message.photo:
+            # Получаем файл с наибольшим разрешением
+            photo_file = await update.message.photo[-1].get_file()
+            logging.info(f"Получено фото от пользователя {update.message.from_user.id}")
+        elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith('image/'):
+            # Получаем документ, если это изображение
+            photo_file = await update.message.document.get_file()
+            logging.info(f"Получен документ-изображение от пользователя {update.message.from_user.id}")
+        
+        if not photo_file:
+            # Если пользователь отправил текст или другой тип файла
             await update.message.reply_text(
-                "Пожалуйста, отправьте скриншот с результатами второго теста.",
-                reply_markup=ReplyKeyboardMarkup([["Отменить"]], resize_keyboard=True)
+                "Пожалуйста, отправьте скриншот с результатами второго теста в виде изображения.",
+                reply_markup=ReplyKeyboardRemove()
             )
             return WAITING_FOR_SECOND_TEST
 
         user_id = update.message.from_user.id
-        photo = update.message.photo[-1]  # Берем самую большую версию фото
         
         # Загружаем результаты первого теста и обновляем статистику последнего ответа
         progress = load_user_progress(user_id)
         answers = progress.get("answers", [])
         answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
-        letter_to_number = progress.get("current_mapping", {})
         
         # Сохраняем обновленную статистику
         save_user_progress(user_id, {
             "current_question": len(answers),
             "answers": answers,
-            "answer_stats": answer_stats,
-            "current_mapping": letter_to_number
+            "answer_stats": answer_stats
         })
 
         # Отправляем уведомление администратору с результатами обоих тестов
@@ -684,44 +738,34 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
             [f"Принять {user_id}", f"Отклонить {user_id}"]
         ]
         admin_markup = ReplyKeyboardMarkup(admin_keyboard, resize_keyboard=True)
-
+        
         try:
             await context.bot.send_photo(
                 chat_id=ADMIN_ID,
-                photo=photo.file_id,
+                photo=photo_file.file_id,
                 caption=admin_message,
-                parse_mode=ParseMode.MARKDOWN,
                 reply_markup=admin_markup
             )
         except Exception as e:
             logging.error(f"Ошибка при отправке скриншота администратору: {str(e)}")
-
+        
         # Отправляем сообщение пользователю
         await update.message.reply_text(
             "Спасибо! Ваши результаты получены и отправлены на рассмотрение.\n"
             "Мы свяжемся с вами в ближайшее время.",
             reply_markup=ReplyKeyboardRemove()
         )
-
+        
+        # Обновляем статус теста
+        update_test_status(user_id, "completed_second_test")
+        
         return ConversationHandler.END
-
     except Exception as e:
-        logging.error(f"Ошибка при обработке результатов теста: {str(e)}")
-        return WAITING_FOR_SECOND_TEST
-
-async def cancel(update: Update, context: CallbackContext) -> int:
-    """
-    Отменяет текущий диалог
-    """
-
-    try:
+        logging.error(f"Ошибка при обработке результатов второго теста: {str(e)}")
         await update.message.reply_text(
-            "Тест отменен. Для начала нажмите /start",
+            "Произошла ошибка. Пожалуйста, попробуйте еще раз с помощью /start",
             reply_markup=ReplyKeyboardRemove()
         )
-        return ConversationHandler.END
-    except Exception as e:
-        logging.error(f"Ошибка при отмене диалога: {str(e)}")
         return ConversationHandler.END
 
 def create_backup():
@@ -770,10 +814,10 @@ def main() -> None:
                 WAITING_FOR_BENEFITS_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_benefits_choice)],
                 WAITING_FOR_TEST_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_test)],
                 ANSWERING_QUESTIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer)],
-                WAITING_FOR_SECOND_TEST: [MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND, handle_second_test_results)],
+                WAITING_FOR_SECOND_TEST: [MessageHandler((filters.PHOTO | filters.Document.IMAGE) | filters.TEXT & ~filters.COMMAND, handle_second_test_results)],
                 WAITING_FOR_ADMIN_RESPONSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_response)]
             },
-            fallbacks=[CommandHandler("cancel", cancel)]
+            fallbacks=[]  # Убираем обработчик команды cancel
         )
 
         # Добавляем обработчики
