@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 import shutil
 from dotenv import load_dotenv
+import fcntl  # Для блокировки файла
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -36,6 +37,7 @@ DATA_DIR = BASE_DIR / "data"  # Директория для всех данны�
 DB_DIR = DATA_DIR / "db"  # Директория для баз данных
 LOGS_DIR = DATA_DIR / "logs"  # Директория для логов
 TEMP_DIR = DATA_DIR / "temp"  # Директория для временных файлов
+LOCK_FILE = DATA_DIR / "bot.lock"
 
 # Создаем необходимые директории
 for dir_path in [DATA_DIR, DB_DIR, LOGS_DIR, TEMP_DIR]:
@@ -67,6 +69,28 @@ WAITING_FOR_ADMIN_RESPONSE = 6
 
 # Создаём клиента OpenAI
 # client = OpenAI()
+
+def check_single_instance():
+    """
+    Проверяет, что запущен только один экземпляр бота.
+    Возвращает True, если это единственный экземпляр, иначе False.
+    """
+    try:
+        # Пытаемся создать и заблокировать файл
+        lock_file = open(LOCK_FILE, 'w')
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        
+        # Записываем PID в файл блокировки
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        
+        # Сохраняем файловый дескриптор, чтобы блокировка сохранялась
+        # пока программа работает
+        return True, lock_file
+    except IOError:
+        # Не удалось получить блокировку, значит другой экземпляр уже запущен
+        logging.error("Другой экземпляр бота уже запущен. Завершение работы.")
+        return False, None
 
 def init_database():
     """
@@ -201,39 +225,39 @@ def clear_user_progress(user_id: int) -> None:
 
 def format_question_with_options(question: dict, question_number: int) -> tuple[str, dict, list]:
     """
-    Форматирует вопрос и варианты ответов, возвращает текст и маппинг случайных ответов
+    Форматирует вопрос с вариантами ответов для отображения
     """
-    total_questions = len(ALL_QUESTIONS)
-    options = question["options"]
+    # Получаем текст вопроса и варианты ответов
+    question_text = question.get("question", "").replace("*Вопрос:*\n", "")
+    options = question.get("options", {})
     
     # Создаем список пар (номер, текст ответа)
-    original_options = [(str(i), options[str(i)]) for i in range(1, 5)]
+    original_options = [(str(i), options.get(str(i), "")) for i in range(1, 5)]
     
     # Перемешиваем варианты ответов
     random.shuffle(original_options)
     
     # Создаем маппинг буква -> номер ответа для подсчета статистики
-    letter_to_number = {
-        'A': original_options[0][0],
-        'B': original_options[1][0],
-        'C': original_options[2][0],
-        'D': original_options[3][0]
-    }
+    letters = ["A", "B", "C", "D"]
+    letter_to_number = {}
+    keyboard_letters = []
     
-    # Форматируем текст вопроса
-    question_text = question['question'].replace("*Вопрос:*\n", "")
-    formatted_text = (
-        f"*Вопрос {question_number + 1} из {total_questions}:* {question_text}\n\n"
-    )
+    # Форматируем варианты ответов
+    options_text = ""
+    for i, (number, option_text) in enumerate(original_options):
+        letter = letters[i]
+        keyboard_letters.append(letter)
+        letter_to_number[letter] = number
+        
+        # Экранируем специальные символы в тексте варианта
+        escaped_option = escape_markdown_v2(option_text)
+        options_text += f"*{letter}\\)* {escaped_option}\n\n"
     
-    # Добавляем варианты ответов в фиксированном порядке A, B, C, D
-    letters = ['A', 'B', 'C', 'D']
-    for i, letter in enumerate(letters):
-        text = original_options[i][1]
-        formatted_text += f"{letter}\\. {escape_markdown_v2(text)}\n\n"
+    # Экранируем специальные символы в тексте вопроса
+    escaped_question_text = escape_markdown_v2(question_text)
     
-    # Создаем список букв для клавиатуры в фиксированном порядке
-    keyboard_letters = ['A', 'B', 'C', 'D']
+    # Форматируем полный текст вопроса
+    formatted_text = f"Вопрос {question_number + 1} из {len(ALL_QUESTIONS)}:\n\n{escaped_question_text}\n\n{options_text}"
     
     return formatted_text, letter_to_number, keyboard_letters
 
@@ -432,52 +456,51 @@ async def handle_answer(update: Update, context: CallbackContext) -> int:
     """
     Обрабатывает ответ пользователя на вопрос
     """
-    answer = update.message.text
-    user_id = update.message.from_user.id
-
-    if answer == "Отменить":
-        await update.message.reply_text(
-            "Тест отменен. Для начала нажмите /start",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-    # Загружаем прогресс пользователя
-    progress = load_user_progress(user_id)
-    current_question = progress.get("current_question", 0)
-    answers = progress.get("answers", [])
-    answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
-    letter_to_number = progress.get("current_mapping", {})
-
-    # Преобразуем букву ответа в номер и сохраняем
-    original_answer_number = letter_to_number.get(answer)
-    if original_answer_number:
-        answer_stats[original_answer_number] += 1
-        answers.append(original_answer_number)
-
-        # Сохраняем ответ в базу данных
-        save_answer_to_db(user_id, current_question, original_answer_number)
+    try:
+        user_id = update.message.from_user.id
+        answer_letter = update.message.text
         
-        # Сохраняем обновленный прогресс
+        # Загружаем прогресс пользователя
+        progress = load_user_progress(user_id)
+        current_question = progress.get("current_question", 0)
+        answers = progress.get("answers", [])
+        answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
+        letter_to_number = progress.get("current_mapping", {})
+        
+        # Проверяем, что ответ - одна из букв A, B, C, D
+        if answer_letter not in letter_to_number:
+            await update.message.reply_text(
+                "Пожалуйста, выберите один из вариантов ответа (A, B, C, D)."
+            )
+            return ANSWERING_QUESTIONS
+        
+        # Получаем номер ответа по букве
+        answer_number = letter_to_number[answer_letter]
+        
+        # Сохраняем ответ
+        answers.append(answer_number)
+        
+        # Обновляем статистику ответов
+        answer_stats[str(answer_number)] = answer_stats.get(str(answer_number), 0) + 1
+        
+        # Сохраняем ответ в базу данных
+        save_answer_to_db(user_id, current_question, str(answer_number))
+        
+        # Переходим к следующему вопросу
         current_question += 1
-        save_user_progress(user_id, {
-            "current_question": current_question,
-            "answers": answers,
-            "answer_stats": answer_stats,
-            "current_mapping": letter_to_number
-        })
-
-    if current_question >= len(ALL_QUESTIONS):
-        # Если все вопросы закончились, сохраняем результаты
-        save_test_results(
-            user_id,
-            update.message.from_user.username or "",
-            update.message.from_user.first_name or "",
-            answers,
-            answer_stats
-        )
-        return await finish_test(update, context)
-    else:
+        
+        # Проверяем, есть ли еще вопросы
+        if current_question >= len(ALL_QUESTIONS):
+            # Сохраняем обновленный прогресс
+            save_user_progress(user_id, {
+                "current_question": current_question,
+                "answers": answers,
+                "answer_stats": answer_stats
+            })
+            
+            # Если вопросы закончились, завершаем тест
+            return await finish_test(update, context)
+        
         # Получаем следующий вопрос
         question = ALL_QUESTIONS[current_question]
         
@@ -502,6 +525,13 @@ async def handle_answer(update: Update, context: CallbackContext) -> int:
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return ANSWERING_QUESTIONS
+    except Exception as e:
+        logging.error(f"Ошибка при обработке ответа: {str(e)}")
+        await update.message.reply_text(
+            "Произошла ошибка при обработке вашего ответа. Пожалуйста, попробуйте еще раз с помощью /start",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
 
 async def handle_admin_response(update: Update, context: CallbackContext) -> None:
     """
@@ -638,10 +668,16 @@ def escape_markdown_v2(text):
     """
     Экранирует специальные символы для Markdown V2
     """
-
+    if not text:
+        return ""
+    
+    # Список специальных символов, которые нужно экранировать
     special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    
+    # Экранируем каждый специальный символ
     for char in special_chars:
-        text = text.replace(char, f'\\{char}')
+        text = text.replace(char, f"\\{char}")
+    
     return text
 
 async def finish_test(update: Update, context: CallbackContext) -> int:
@@ -719,6 +755,16 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
             "answer_stats": answer_stats
         })
 
+        # Рассчитываем общее количество ответов
+        total_answers = sum(int(count) for count in answer_stats.values())
+        
+        # Формируем статистику с процентами
+        stats_text = ""
+        for key in sorted(answer_stats.keys()):
+            count = int(answer_stats[key])
+            percent = (count / total_answers * 100) if total_answers > 0 else 0
+            stats_text += f"{key}: {count} ({percent:.1f}%)\n"
+
         # Отправляем уведомление администратору с результатами обоих тестов
         admin_message = (
             f"📊 Новые результаты тестов!\n\n"
@@ -726,10 +772,7 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
             f" (@{update.message.from_user.username})\n"
             f"ID: {user_id}\n\n"
             f"Результаты первого теста:\n"
-            f"1: {answer_stats['1']}\n"
-            f"2: {answer_stats['2']}\n"
-            f"3: {answer_stats['3']}\n"
-            f"4: {answer_stats['4']}\n\n"
+            f"{stats_text}\n"
             f"Скриншот второго теста прикреплен выше."
         )
 
@@ -796,6 +839,12 @@ def main() -> None:
     try:
         logging.info("Запуск бота")
         
+        # Проверяем, что запущен только один экземпляр бота
+        is_single_instance, lock_file = check_single_instance()
+        if not is_single_instance:
+            logging.error("Бот уже запущен. Завершение работы.")
+            return
+        
         # Создаем приложение с увеличенным таймаутом
         application = (
             Application.builder()
@@ -841,6 +890,10 @@ def main() -> None:
                 user_message += "Превышено время ожидания ответа. Пожалуйста, повторите попытку."
             elif "NetworkError" in error_message:
                 user_message += "Проблема с сетевым подключением. Пожалуйста, проверьте ваше соединение."
+            elif "Conflict: terminated by other getUpdates request" in error_message:
+                user_message += "Бот уже запущен в другом месте. Пожалуйста, используйте только один экземпляр бота."
+                logging.warning("Обнаружен конфликт с другим экземпляром бота. Завершение работы.")
+                return  # Прекращаем обработку ошибки, так как она будет повторяться
             else:
                 user_message += "Пожалуйста, попробуйте позже или начните сначала с помощью /start"
             
@@ -866,6 +919,7 @@ def main() -> None:
         raise
 
 if __name__ == "__main__":
+    lock_file = None
     try:
         main()
     except KeyboardInterrupt:
@@ -874,3 +928,11 @@ if __name__ == "__main__":
         logging.error(f"Критическая ошибка: {e}")
     finally:
         logging.info("Завершение работы бота...")
+        # Если файл блокировки был создан, закрываем его
+        if 'lock_file' in locals() and lock_file:
+            try:
+                lock_file.close()
+                if os.path.exists(LOCK_FILE):
+                    os.remove(LOCK_FILE)
+            except Exception as e:
+                logging.error(f"Ошибка при освобождении файла блокировки: {e}")
