@@ -2,8 +2,8 @@ import logging
 import openai
 import asyncio
 from openai import OpenAI
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, ConversationHandler
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, ConversationHandler, CallbackQueryHandler
 from telegram.constants import ParseMode
 import psutil
 import sys
@@ -13,13 +13,16 @@ import signal
 import random
 from questions import ALL_QUESTIONS  # Импортируем вопросы из отдельного модуля
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List, Tuple
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 import shutil
 from dotenv import load_dotenv
 import fcntl  # Для блокировки файла
+import re
+import schedule
+import threading
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -915,18 +918,20 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
             f"Скриншот второго теста прикреплен выше."
         )
 
-        # Создаем клавиатуру с кнопками для администратора
-        admin_keyboard = [
-            [f"Принять {user_id}", f"Отклонить {user_id}"]
-        ]
-        admin_markup = ReplyKeyboardMarkup(admin_keyboard, resize_keyboard=True)
+        # Создаем инлайн-клавиатуру с кнопками для администратора
+        admin_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
+                InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
+            ]
+        ])
         
         try:
             await context.bot.send_photo(
                 chat_id=ADMIN_ID,
                 photo=photo_file.file_id,
                 caption=admin_message,
-                reply_markup=admin_markup
+                reply_markup=admin_keyboard
             )
         except Exception as e:
             logging.error(f"Ошибка при отправке скриншота администратору: {str(e)}")
@@ -968,6 +973,69 @@ def schedule_backup():
         logging.info("Планирование резервного копирования")
     except Exception as e:
         logging.error(f"Ошибка при планировании резервного копирования: {str(e)}")
+
+async def handle_admin_callback(update: Update, context: CallbackContext) -> None:
+    """
+    Обрабатывает нажатия на инлайн-кнопки администратора
+    """
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id != ADMIN_ID:
+        await query.message.reply_text("У вас нет прав для выполнения этой команды.")
+        return
+    
+    try:
+        # Получаем данные из callback_data
+        data = query.data
+        action, user_id = data.split("_")
+        user_id = int(user_id)
+        
+        if action == "accept":
+            status = "Принят"
+            message = (
+                "🎊 *Поздравляем\\! Вы приняты в программу Welcome to Tier 2\\!*\n\n"
+                "Для начала работы и согласования расписания, пожалуйста, запишитесь на вводную встречу:\n"
+                f"{escape_markdown_v2(CALENDLY_LINK)}"
+            )
+        elif action == "reject":
+            status = "Отклонен"
+            message = (
+                "*Спасибо за интерес к нашей программе\\!*\n\n"
+                "К сожалению, на данном этапе мы не можем предложить вам участие в программе\\.\n"
+                "Рекомендуем продолжить работу над собой и попробовать снова через некоторое время\\."
+            )
+        else:
+            return
+        
+        # Отправляем сообщение пользователю
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            
+            # Обновляем сообщение администратора, чтобы показать, что решение принято
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                f"✅ Пользователь {status} (ID: {user_id})"
+            )
+        except Exception as e:
+            if "bot can't initiate conversation with a user" in str(e):
+                await query.message.reply_text(
+                    f"❌ Не удалось отправить ответ пользователю\\. Он еще не начал диалог с ботом\\.\n\n"
+                    f"*Необходимые действия:*\n"
+                    f"1\\. Попросите пользователя перейти в @{BOT_USERNAME}\n"
+                    f"2\\. Нажать START или отправить команду /start\n"
+                    f"3\\. После этого повторите отправку ответа той же командой",
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            else:
+                await query.message.reply_text(f"❌ Ошибка при отправке ответа: {str(e)}")
+    except Exception as e:
+        logging.error(f"Ошибка при обработке callback: {str(e)}")
+        await query.message.reply_text(f"Произошла ошибка: {str(e)}")
 
 def main() -> None:
     """
@@ -1017,6 +1085,9 @@ def main() -> None:
             filters.TEXT & filters.Regex(r"^(Принять|Отклонить) \d+$"),
             handle_admin_decision
         ))
+        
+        # Добавляем обработчик для инлайн-кнопок
+        application.add_handler(CallbackQueryHandler(handle_admin_callback))
 
         # Добавляем обработчик ошибок с более информативными сообщениями
         async def error_handler(update: object, context: CallbackContext) -> None:
