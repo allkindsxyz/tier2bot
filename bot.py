@@ -223,7 +223,7 @@ def clear_user_progress(user_id: int) -> None:
     except Exception as e:
         logging.error(f"Ошибка при очистке сохраненного прогресса пользователя: {e}")
 
-def format_question_with_options(question: dict, question_number: int) -> tuple[str, dict, list]:
+def format_question_with_options(question: dict, question_number: int, saved_options=None) -> tuple[str, dict, list]:
     """
     Форматирует вопрос с вариантами ответов для отображения
     """
@@ -234,8 +234,15 @@ def format_question_with_options(question: dict, question_number: int) -> tuple[
     # Создаем список пар (номер, текст ответа)
     original_options = [(str(i), options.get(str(i), "")) for i in range(1, 5)]
     
-    # Перемешиваем варианты ответов
-    random.shuffle(original_options)
+    # Если есть сохраненный порядок вариантов, используем его
+    # Иначе перемешиваем варианты ответов
+    if saved_options:
+        # Используем сохраненный порядок
+        shuffled_options = saved_options
+    else:
+        # Перемешиваем варианты ответов
+        shuffled_options = original_options.copy()
+        random.shuffle(shuffled_options)
     
     # Создаем маппинг буква -> номер ответа для подсчета статистики
     letters = ["A", "B", "C", "D"]
@@ -244,7 +251,7 @@ def format_question_with_options(question: dict, question_number: int) -> tuple[
     
     # Форматируем варианты ответов
     options_text = ""
-    for i, (number, option_text) in enumerate(original_options):
+    for i, (number, option_text) in enumerate(shuffled_options):
         letter = letters[i]
         keyboard_letters.append(letter)
         letter_to_number[letter] = number
@@ -259,7 +266,7 @@ def format_question_with_options(question: dict, question_number: int) -> tuple[
     # Форматируем полный текст вопроса
     formatted_text = f"Вопрос {question_number + 1} из {len(ALL_QUESTIONS)}:\n\n{escaped_question_text}\n\n{options_text}"
     
-    return formatted_text, letter_to_number, keyboard_letters
+    return formatted_text, letter_to_number, keyboard_letters, shuffled_options
 
 async def start(update: Update, context: CallbackContext) -> int:
     """
@@ -378,7 +385,7 @@ async def start_test(update: Update, context: CallbackContext) -> int:
         question = ALL_QUESTIONS[current_question]
         
         # Форматируем вопрос и получаем маппинг ответов
-        formatted_text, letter_to_number, keyboard_letters = format_question_with_options(question, current_question)
+        formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question)
         
         # Создаем клавиатуру с вариантами ответов по 2 в ряд
         keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
@@ -388,7 +395,8 @@ async def start_test(update: Update, context: CallbackContext) -> int:
             "current_question": 0,
             "answers": [],
             "answer_stats": {"1": 0, "2": 0, "3": 0, "4": 0},
-            "current_mapping": letter_to_number
+            "current_mapping": letter_to_number,
+            "shuffled_options": shuffled_options
         })
         
         # Отправляем первый вопрос
@@ -458,7 +466,7 @@ async def handle_answer(update: Update, context: CallbackContext) -> int:
     """
     try:
         user_id = update.message.from_user.id
-        answer_letter = update.message.text
+        answer_text = update.message.text
         
         # Загружаем прогресс пользователя
         progress = load_user_progress(user_id)
@@ -466,16 +474,25 @@ async def handle_answer(update: Update, context: CallbackContext) -> int:
         answers = progress.get("answers", [])
         answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
         letter_to_number = progress.get("current_mapping", {})
+        shuffled_options = progress.get("shuffled_options", [])
+        
+        # Проверяем, если пользователь хочет вернуться к предыдущему вопросу
+        if answer_text == "Вернуться к предыдущему вопросу":
+            return await go_to_previous_question(update, context)
+        
+        # Проверяем, если пользователь хочет завершить тест
+        if answer_text == "Завершить тест":
+            return await finish_test(update, context)
         
         # Проверяем, что ответ - одна из букв A, B, C, D
-        if answer_letter not in letter_to_number:
+        if answer_text not in letter_to_number:
             await update.message.reply_text(
                 "Пожалуйста, выберите один из вариантов ответа (A, B, C, D)."
             )
             return ANSWERING_QUESTIONS
         
         # Получаем номер ответа по букве
-        answer_number = letter_to_number[answer_letter]
+        answer_number = letter_to_number[answer_text]
         
         # Сохраняем ответ
         answers.append(answer_number)
@@ -495,27 +512,44 @@ async def handle_answer(update: Update, context: CallbackContext) -> int:
             save_user_progress(user_id, {
                 "current_question": current_question,
                 "answers": answers,
-                "answer_stats": answer_stats
+                "answer_stats": answer_stats,
+                "shuffled_options": shuffled_options
             })
             
-            # Если вопросы закончились, завершаем тест
-            return await finish_test(update, context)
+            # Создаем клавиатуру с кнопками для завершения теста
+            keyboard = [
+                ["Вернуться к предыдущему вопросу"],
+                ["Завершить тест"]
+            ]
+            
+            # Отправляем сообщение о завершении теста с клавиатурой
+            await update.message.reply_text(
+                "Вы ответили на все вопросы! Вы можете вернуться к предыдущему вопросу или завершить тест.",
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+            
+            return ANSWERING_QUESTIONS
         
         # Получаем следующий вопрос
         question = ALL_QUESTIONS[current_question]
         
         # Форматируем следующий вопрос и получаем новый маппинг
-        formatted_text, letter_to_number, keyboard_letters = format_question_with_options(question, current_question)
+        formatted_text, letter_to_number, keyboard_letters, new_shuffled_options = format_question_with_options(question, current_question)
         
         # Создаем клавиатуру с вариантами ответов по 2 в ряд
         keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
+        
+        # Добавляем кнопку "Вернуться к предыдущему вопросу" только если это не первый вопрос
+        if current_question > 0:
+            keyboard.append(["Вернуться к предыдущему вопросу"])
         
         # Сохраняем прогресс с новым маппингом
         save_user_progress(user_id, {
             "current_question": current_question,
             "answers": answers,
             "answer_stats": answer_stats,
-            "current_mapping": letter_to_number
+            "current_mapping": letter_to_number,
+            "shuffled_options": new_shuffled_options
         })
         
         # Отправляем следующий вопрос
@@ -529,6 +563,99 @@ async def handle_answer(update: Update, context: CallbackContext) -> int:
         logging.error(f"Ошибка при обработке ответа: {str(e)}")
         await update.message.reply_text(
             "Произошла ошибка при обработке вашего ответа. Пожалуйста, попробуйте еще раз с помощью /start",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+
+async def go_to_previous_question(update: Update, context: CallbackContext) -> int:
+    """
+    Возвращает пользователя к предыдущему вопросу
+    """
+    try:
+        user_id = update.message.from_user.id
+        
+        # Загружаем прогресс пользователя
+        progress = load_user_progress(user_id)
+        current_question = progress.get("current_question", 0)
+        answers = progress.get("answers", [])
+        answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
+        shuffled_options_history = progress.get("shuffled_options_history", {})
+        
+        # Проверяем, можно ли вернуться к предыдущему вопросу
+        if current_question <= 0 or len(answers) == 0:
+            await update.message.reply_text(
+                "Вы находитесь на первом вопросе, невозможно вернуться назад."
+            )
+            
+            # Повторно отправляем текущий вопрос
+            question = ALL_QUESTIONS[current_question]
+            formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question, progress.get("shuffled_options"))
+            
+            # Создаем клавиатуру с вариантами ответов по 2 в ряд
+            keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
+            
+            # Сохраняем маппинг
+            save_user_progress(user_id, {
+                "current_question": current_question,
+                "answers": answers,
+                "answer_stats": answer_stats,
+                "current_mapping": letter_to_number,
+                "shuffled_options": shuffled_options
+            })
+            
+            await update.message.reply_text(
+                formatted_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+            return ANSWERING_QUESTIONS
+        
+        # Удаляем последний ответ из списка ответов
+        last_answer = answers.pop()
+        
+        # Уменьшаем счетчик для этого ответа в статистике
+        if last_answer in answer_stats:
+            answer_stats[last_answer] = max(0, answer_stats[last_answer] - 1)
+        
+        # Возвращаемся к предыдущему вопросу
+        current_question -= 1
+        
+        # Получаем предыдущий вопрос
+        question = ALL_QUESTIONS[current_question]
+        
+        # Получаем сохраненный порядок вариантов для этого вопроса
+        saved_options = progress.get("shuffled_options")
+        
+        # Форматируем вопрос и получаем новый маппинг, используя сохраненный порядок
+        formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question, saved_options)
+        
+        # Создаем клавиатуру с вариантами ответов по 2 в ряд
+        keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
+        
+        # Добавляем кнопку "Вернуться к предыдущему вопросу" только если это не первый вопрос
+        if current_question > 0:
+            keyboard.append(["Вернуться к предыдущему вопросу"])
+        
+        # Сохраняем обновленный прогресс
+        save_user_progress(user_id, {
+            "current_question": current_question,
+            "answers": answers,
+            "answer_stats": answer_stats,
+            "current_mapping": letter_to_number,
+            "shuffled_options": shuffled_options
+        })
+        
+        # Отправляем предыдущий вопрос
+        await update.message.reply_text(
+            formatted_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return ANSWERING_QUESTIONS
+    except Exception as e:
+        logging.error(f"Ошибка при возврате к предыдущему вопросу: {str(e)}")
+        await update.message.reply_text(
+            "Произошла ошибка. Пожалуйста, попробуйте еще раз с помощью /start",
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
@@ -687,7 +814,19 @@ async def finish_test(update: Update, context: CallbackContext) -> int:
     try:
         user_id = update.message.from_user.id
         
-        # Формируем сообщение с результатами
+        # Загружаем прогресс пользователя
+        progress = load_user_progress(user_id)
+        answers = progress.get("answers", [])
+        answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
+        
+        # Сохраняем статистику ответов для использования после прохождения второго теста
+        save_user_progress(user_id, {
+            "current_question": len(answers),
+            "answers": answers,
+            "answer_stats": answer_stats
+        })
+        
+        # Формируем сообщение с результатами для пользователя
         results_message = (
             "*Спасибо за прохождение первого теста\\!*\n\n"
             "Для полной оценки вашего уровня, пожалуйста, пройдите второй тест по ссылке:\n"
@@ -696,7 +835,7 @@ async def finish_test(update: Update, context: CallbackContext) -> int:
             "и отправьте его сюда\\."
         )
         
-        # Отправляем сообщение с результатами
+        # Отправляем сообщение с результатами пользователю
         await update.message.reply_text(
             results_message,
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -794,8 +933,7 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
         
         # Отправляем сообщение пользователю
         await update.message.reply_text(
-            "Спасибо! Ваши результаты получены и отправлены на рассмотрение.\n"
-            "Мы свяжемся с вами в ближайшее время.",
+            "Спасибо за прохождение тестов! Мы получили ваши результаты и свяжемся в ближайшее время.",
             reply_markup=ReplyKeyboardRemove()
         )
         
