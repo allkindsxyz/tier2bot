@@ -2,7 +2,7 @@ import logging
 import openai
 import asyncio
 from openai import OpenAI
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, ConversationHandler, CallbackQueryHandler
 from telegram.constants import ParseMode
 import psutil
@@ -11,7 +11,7 @@ import os
 import time
 import signal
 import random
-from questions import ALL_QUESTIONS  # Импортируем вопросы из отдельного модуля
+from questions import ALL_QUESTIONS, get_questions_by_language  # Импортируем вопросы из отдельного модуля
 import json
 from typing import Dict, Any, Optional, List, Tuple
 import sqlite3
@@ -23,6 +23,7 @@ import fcntl  # Для блокировки файла
 import re
 import schedule
 import threading
+from localization import get_text, save_user_language, get_user_language  # Импортируем функции для локализации
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -33,6 +34,9 @@ ADMIN_ID = int(os.getenv('ADMIN_ID'))
 BOT_USERNAME = os.getenv('BOT_USERNAME')
 CALENDLY_LINK = os.getenv('CALENDLY_LINK')
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'tier2botadmin')
+
+# Создаем список администраторов
+ADMIN_IDS = [ADMIN_ID]
 
 # Создаем структуру директорий для данных
 BASE_DIR = Path(__file__).resolve().parent  # Директория с bot.py
@@ -62,8 +66,7 @@ logging.basicConfig(
 )
 
 # Определяем состояния
-WAITING_FOR_INITIAL_CHOICE = 0
-WAITING_FOR_BENEFITS_CHOICE = 1
+CHOOSING_LANGUAGE = -1  # Новое состояние для выбора языка
 WAITING_FOR_TEST_CHOICE = 2
 WAITING_FOR_CONTINUE_CHOICE = 3
 ANSWERING_QUESTIONS = 4
@@ -78,6 +81,7 @@ def check_single_instance():
     Проверяет, что запущен только один экземпляр бота.
     Возвращает True, если это единственный экземпляр, иначе False.
     """
+    global lock_file
     try:
         # Пытаемся создать и заблокировать файл
         lock_file = open(LOCK_FILE, 'w')
@@ -87,30 +91,101 @@ def check_single_instance():
         lock_file.write(str(os.getpid()))
         lock_file.flush()
         
-        # Сохраняем файловый дескриптор, чтобы блокировка сохранялась
-        # пока программа работает
-        return True, lock_file
+        # Возвращаем True, если удалось получить блокировку
+        return True
     except IOError:
         # Не удалось получить блокировку, значит другой экземпляр уже запущен
         logging.error("Другой экземпляр бота уже запущен. Завершение работы.")
-        return False, None
+        return False
 
 def init_database():
     """
     Инициализирует базу данных
     """
-
     try:
-        pass
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Создаем таблицу для ответов пользователей
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS answers (
+                user_id INTEGER,
+                question_number INTEGER,
+                answer TEXT,
+                timestamp INTEGER,
+                PRIMARY KEY (user_id, question_number)
+            )
+        ''')
+        
+        # Создаем таблицу для результатов тестов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS test_results (
+                user_id INTEGER PRIMARY KEY,
+                dominant_type TEXT,
+                timestamp INTEGER
+            )
+        ''')
+        
+        # Проверяем наличие столбца dominant_type в таблице test_results
+        cursor.execute("PRAGMA table_info(test_results)")
+        columns = [column[1] for column in cursor.fetchall()]
+        if 'dominant_type' not in columns:
+            logging.info("Добавляем столбец dominant_type в таблицу test_results")
+            cursor.execute("ALTER TABLE test_results ADD COLUMN dominant_type TEXT")
+        
+        # Создаем таблицу для полных результатов тестов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS full_test_results (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                answers TEXT,
+                answer_stats TEXT,
+                timestamp INTEGER
+            )
+        ''')
+        
+        # Создаем таблицу для статусов тестов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS test_status (
+                user_id INTEGER PRIMARY KEY,
+                status TEXT,
+                timestamp INTEGER
+            )
+        ''')
+        
+        # Создаем таблицу для языковых настроек пользователей
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_language (
+                user_id INTEGER PRIMARY KEY,
+                language TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+        logging.info("База данных инициализирована успешно")
     except Exception as e:
         logging.error(f"Ошибка при инициализации базы данных: {e}")
+
+def get_db_connection():
+    """
+    Создает и возвращает соединение с базой данных
+    """
+    try:
+        conn = sqlite3.connect(DATABASE_FILE)
+        return conn
+    except Exception as e:
+        logging.error(f"Ошибка при подключении к базе данных: {e}")
+        raise e
 
 def save_answer_to_db(user_id: int, question_number: int, answer: str):
     """
     Сохраняет каждый ответ пользователя в базу данных
     """
     try:
-        conn = sqlite3.connect(DATABASE_FILE)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
         # Создаем таблицу, если она не существует
@@ -134,6 +209,21 @@ def save_answer_to_db(user_id: int, question_number: int, answer: str):
     except Exception as e:
         logging.error(f"Ошибка при сохранении ответа в базу данных: {e}")
 
+def save_test_result(user_id: int, dominant_type: str):
+    """
+    Сохраняет результат теста пользователя (доминирующий тип)
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        "INSERT OR REPLACE INTO test_results (user_id, dominant_type, timestamp) VALUES (?, ?, ?)",
+        (user_id, dominant_type, int(time.time()))
+    )
+    
+    conn.commit()
+    conn.close()
+
 def save_test_results(user_id: int, username: str, first_name: str, answers: list, answer_stats: dict):
     """
     Сохраняет результаты теста в базу данных
@@ -142,23 +232,22 @@ def save_test_results(user_id: int, username: str, first_name: str, answers: lis
         conn = sqlite3.connect(DATABASE_FILE)
         cursor = conn.cursor()
         
-        # Создаем таблицу, если она не существует
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS test_results (
-                user_id INTEGER,
-                username TEXT,
-                first_name TEXT,
-                answers TEXT,
-                answer_stats TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
+        # Проверяем, существует ли запись для этого пользователя
+        cursor.execute('SELECT 1 FROM test_results WHERE user_id = ?', (user_id,))
+        exists = cursor.fetchone()
         
-        # Сохраняем результаты
-        cursor.execute(
-            'INSERT INTO test_results (user_id, username, first_name, answers, answer_stats) VALUES (?, ?, ?, ?, ?)',
-            (user_id, username, first_name, json.dumps(answers), json.dumps(answer_stats))
-        )
+        if exists:
+            # Обновляем существующую запись
+            cursor.execute(
+                'UPDATE test_results SET username = ?, first_name = ?, answers = ?, answer_stats = ?, timestamp = CURRENT_TIMESTAMP WHERE user_id = ?',
+                (username, first_name, json.dumps(answers), json.dumps(answer_stats), user_id)
+            )
+        else:
+            # Создаем новую запись
+            cursor.execute(
+                'INSERT INTO test_results (user_id, username, first_name, answers, answer_stats) VALUES (?, ?, ?, ?, ?)',
+                (user_id, username, first_name, json.dumps(answers), json.dumps(answer_stats))
+            )
         
         conn.commit()
         conn.close()
@@ -171,9 +260,20 @@ def update_test_status(user_id: int, status: str):
     """
 
     try:
-        pass
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "INSERT OR REPLACE INTO test_status (user_id, status, timestamp) VALUES (?, ?, ?)",
+            (user_id, status, int(time.time()))
+        )
+        
+        conn.commit()
+        conn.close()
+        
+        logging.info(f"Обновлен статус теста для пользователя {user_id}: {status}")
     except Exception as e:
-        logging.error(f"Ошибка при обновлении статуса теста пользователя: {e}")
+        logging.error(f"Ошибка при обновлении статуса теста: {e}")
 
 def save_user_progress(user_id: int, data: Dict[str, Any]) -> None:
     """
@@ -226,12 +326,21 @@ def clear_user_progress(user_id: int) -> None:
     except Exception as e:
         logging.error(f"Ошибка при очистке сохраненного прогресса пользователя: {e}")
 
-def format_question_with_options(question: dict, question_number: int, saved_options=None) -> tuple[str, dict, list]:
+def format_question_with_options(question: dict, question_number: int, saved_options=None, user_id=None) -> tuple[str, dict, list]:
     """
     Форматирует вопрос с вариантами ответов для отображения
     """
+    # Получаем язык пользователя (если не передан, используем русский)
+    language = get_user_language(user_id) if user_id else "ru"
+    
     # Получаем текст вопроса и варианты ответов
-    question_text = question.get("question", "").replace("*Вопрос:*\n", "")
+    question_text = question.get("question", "")
+    # Удаляем префикс в зависимости от языка
+    if language == "ru":
+        question_text = question_text.replace("*Вопрос:*\n", "")
+    else:
+        question_text = question_text.replace("*Question:*\n", "")
+    
     options = question.get("options", {})
     
     # Создаем список пар (номер, текст ответа)
@@ -266,111 +375,39 @@ def format_question_with_options(question: dict, question_number: int, saved_opt
     # Экранируем специальные символы в тексте вопроса
     escaped_question_text = escape_markdown_v2(question_text)
     
-    # Форматируем полный текст вопроса
-    formatted_text = f"Вопрос {question_number + 1} из {len(ALL_QUESTIONS)}:\n\n{escaped_question_text}\n\n{options_text}"
+    # Получаем локализованный заголовок вопроса
+    questions = get_questions_by_language(language)
+    question_header = get_text("question_header", language).format(current=question_number + 1, total=len(questions))
+    
+    # Форматируем полный текст вопроса с блочным форматированием (вариант 2)
+    formatted_text = f"🔷 *{question_header}*\n*{escaped_question_text}*\n\n{options_text}"
     
     return formatted_text, letter_to_number, keyboard_letters, shuffled_options
 
 async def start(update: Update, context: CallbackContext) -> int:
     """
-    Отправляет приветственное сообщение и показывает меню
+    Отправляет приветственное сообщение и показывает меню выбора языка
     """
     logging.info(f"Получена команда /start от пользователя {update.message.from_user.id}")
     
+    # Создаем инлайн-клавиатуру с выбором языка
     keyboard = [
-        ["Да, пожалуйста", "Нет, спасибо"]
+        [
+            InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
+            InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
+        ]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    welcome_message = (
-        "*Enter Tier 2* \\- это программа перехода на второй уровень сознания по модели Спиральная Динамика\\.\n\n"
-        "Один из авторов модели Клэр Грейвз описывал переход на Tier 2 как фундаментальный сдвиг в сознании\\, "
-        "который меняет сам способ мышления\\.\n\n"
-        "Если уровни Tier 1 по сути спорят между собой и борются за свою картину мира\\, "
-        "на Tier 2 человек впервые начинает видеть систему целиком и понимать ценность всех предыдущих стадий\\.\n\n"
-        "Менее 1\\% людей находятся на этом уровне\\. Хотите узнать\\, что дает переход на второй уровень сознания?"
+    # Отправляем сообщение с выбором языка
+    await update.message.reply_text(
+        "Выберите язык / Choose language:",
+        reply_markup=reply_markup
     )
-    
-    # Путь к изображению
-    image_path = "images/tier2_logo.jpg"
-    
-    try:
-        # Проверяем, существует ли файл
-        if os.path.exists(image_path):
-            # Отправляем одно сообщение с картинкой и текстом
-            await update.message.reply_photo(
-                photo=open(image_path, 'rb'),
-                caption=welcome_message,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-        else:
-            logging.warning(f"Изображение не найдено: {image_path}")
-            # Если изображение не найдено, отправляем только текст
-            await update.message.reply_text(
-                welcome_message,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-    except Exception as e:
-        logging.error(f"Ошибка при отправке сообщения с изображением: {e}")
-        # В случае ошибки отправляем только текст
-        await update.message.reply_text(
-            welcome_message,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-    
-    return WAITING_FOR_BENEFITS_CHOICE
 
-async def handle_benefits_choice(update: Update, context: CallbackContext) -> int:
-    """
-    Обрабатывает выбор пользователя о просмотре преимуществ
-    """
-    choice = update.message.text
-    logging.info(f"Получен ответ от пользователя: {choice}")
+    logging.info(f"Отправлено сообщение с выбором языка пользователю {update.message.from_user.id}")
     
-    if choice == "Да, пожалуйста" or choice == "📝 Пройти тест":
-        if choice == "Да, пожалуйста":
-            logging.info("Пользователь выбрал 'Да, пожалуйста'")
-            benefits_message = (
-                "*Основные преимущества Тиер 2:*\n\n"
-                "• *Разрыв с борьбой Тиер 1*\n"
-                "Человек перестаёт воспринимать свою текущую систему ценностей как единственно верную и не хочет воевать с другими\\. "
-                "Он понимает\\, что каждый уровень имеет своё место и смысл\\.\n\n"
-                "• *Гибкость и адаптивность*\n"
-                "Вместо привязанности к конкретной идеологии или технике человек начинает свободно использовать инструменты из разных мировоззрений\\, "
-                "исходя из ситуации\\.\n\n"
-                "• *Системное мышление*\n"
-                "Восприятие становится более сложным: человек видит взаимосвязи и динамику развития систем\\, "
-                "а не просто «правильные» и «неправильные» вещи\\.\n\n"
-                "• *Автономность*\n"
-                "Он больше не нуждается в комьюнити или внешнем подтверждении своих взглядов\\, но и не противопоставляет себя обществу\\.\n\n"
-                "• *Изменение мотивации*\n"
-                "Человек не ищет удовольствий ради удовольствий или просветления ради просветления\\. "
-                "Он действует\\, исходя из более глубокого понимания себя и мира\\.\n\n"
-                "> _\"Клэр Грейвз описывал переход в Тиер 2 как фундаментальный сдвиг в сознании\\, который меняет сам способ мышления\\\"_\n\n"
-            )
-            
-            keyboard = [
-                ["📝 Пройти тест", "Нет, спасибо"]
-            ]
-            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            
-            await update.message.reply_text(
-                benefits_message + "\n\n" + "Мы принимаем людей в программу только по результатам двух тестов и оставляем за собой право отказать в участии\\, если посчитаем\\, что вы не готовы\\. Начать первый тест?",
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=reply_markup
-            )
-            return WAITING_FOR_TEST_CHOICE
-        else:
-            return await start_test(update, context)
-    else:
-        await update.message.reply_text(
-            "Спасибо за интерес! Если захотите узнать больше, просто нажмите /start",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
+    return CHOOSING_LANGUAGE
 
 async def start_test(update: Update, context: CallbackContext) -> int:
     """
@@ -378,20 +415,28 @@ async def start_test(update: Update, context: CallbackContext) -> int:
     """
     choice = update.message.text
     user_id = update.message.from_user.id
+    language = get_user_language(user_id)
     
-    if choice == "📝 Пройти тест":
+    if choice == get_text("take_test", language):
         # Очищаем прогресс пользователя перед началом теста
         clear_user_progress(user_id)
         
         # Загружаем первый вопрос
         current_question = 0
-        question = ALL_QUESTIONS[current_question]
+        questions = get_questions_by_language(language)
+        question = questions[current_question]
         
         # Форматируем вопрос и получаем маппинг ответов
-        formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question)
+        formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question, user_id=user_id)
         
-        # Создаем клавиатуру с вариантами ответов по 2 в ряд
-        keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
+        # Создаем инлайн-клавиатуру с вариантами ответов по 2 в ряд
+        keyboard = []
+        for i in range(0, len(keyboard_letters), 2):
+            row = []
+            for j in range(i, min(i+2, len(keyboard_letters))):
+                letter = keyboard_letters[j]
+                row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
+            keyboard.append(row)
         
         # Сохраняем начальное состояние с маппингом
         save_user_progress(user_id, {
@@ -399,23 +444,23 @@ async def start_test(update: Update, context: CallbackContext) -> int:
             "answers": [],
             "answer_stats": {"1": 0, "2": 0, "3": 0, "4": 0},
             "current_mapping": letter_to_number,
-            "shuffled_options": shuffled_options
+            "shuffled_options": shuffled_options,
+            "question_options": {"0": shuffled_options}  # Сохраняем порядок вариантов для первого вопроса
         })
         
         # Отправляем первый вопрос
         await update.message.reply_text(
-            formatted_text,
+                formatted_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return ANSWERING_QUESTIONS
     else:
         await update.message.reply_text(
-            "Спасибо за интерес! Если захотите пройти тест, просто нажмите /start",
-            reply_markup=ReplyKeyboardRemove()
+            escape_markdown_v2(get_text("thanks_for_interest", language)),
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         return ConversationHandler.END
-
 async def start_new_test(update: Update, context: CallbackContext) -> str:
     """
     Начинает новый тест
@@ -425,243 +470,309 @@ async def start_new_test(update: Update, context: CallbackContext) -> str:
 
 async def handle_continue_choice(update: Update, context: CallbackContext) -> int:
     """
-    Обрабатывает выбор пользователя о продолжении теста
+    Обрабатывает выбор пользователя продолжить тест
     """
     choice = update.message.text
     user_id = update.message.from_user.id
-
+    language = get_user_language(user_id)
+    
     if choice == "Продолжить":
         # Загружаем прогресс пользователя
         progress = load_user_progress(user_id)
         current_question = progress.get("current_question", 0)
+        questions = get_questions_by_language(language)
         
-        if current_question >= len(ALL_QUESTIONS):
+        if current_question >= len(questions):
             # Если все вопросы закончились, завершаем тест
             return await finish_test(update, context)
         
         # Получаем текущий вопрос
-        question = ALL_QUESTIONS[current_question]
+        question = questions[current_question]
         
-        # Создаем клавиатуру с вариантами ответов
+        # Создаем инлайн-клавиатуру с вариантами ответов
         keyboard = []
-        for letter in keyboard_letters:
-            keyboard.append([letter])
-        # Убираем кнопку "Отменить"
-        # keyboard.append(["Отменить"])
+        keyboard_letters = ["A", "B", "C", "D"]
+        for i in range(0, len(keyboard_letters), 2):
+            row = []
+            for j in range(i, min(i+2, len(keyboard_letters))):
+                letter = keyboard_letters[j]
+                row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
+            keyboard.append(row)
         
         # Отправляем вопрос пользователю
         await update.message.reply_text(
             f"{current_question + 1}. {question['text']}\n\n"
             "Выберите один из вариантов:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return ANSWERING_QUESTIONS
     else:
         await update.message.reply_text(
-            "Тест отменен. Для начала нажмите /start",
-            reply_markup=ReplyKeyboardRemove()
+            escape_markdown_v2(get_text("thanks_for_interest", language)),
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         return ConversationHandler.END
 
-async def handle_answer(update: Update, context: CallbackContext) -> int:
+async def handle_answer_callback(update: Update, context: CallbackContext) -> int:
     """
-    Обрабатывает ответ пользователя на вопрос
+    Обрабатывает ответы пользователя на вопросы теста через инлайн-кнопки
     """
-    try:
-        user_id = update.message.from_user.id
-        answer_text = update.message.text
+    query = update.callback_query
+    await query.answer()  # Отвечаем на запрос, чтобы убрать часы загрузки
+    
+    user_id = query.from_user.id
+    callback_data = query.data
+    language = get_user_language(user_id)
+    
+    # Проверяем, что это callback для ответа на вопрос или кнопки "Назад"
+    if callback_data.startswith("answer_"):
+        # Получаем букву ответа
+        answer_letter = callback_data.split("_")[1]
+        logging.info(f"Получен ответ от пользователя {user_id}: {answer_letter}")
         
-        # Загружаем прогресс пользователя
+        # Получаем текущий прогресс пользователя
         progress = load_user_progress(user_id)
-        current_question = progress.get("current_question", 0)
-        answers = progress.get("answers", [])
-        answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
-        letter_to_number = progress.get("current_mapping", {})
-        shuffled_options = progress.get("shuffled_options", [])
         
-        # Проверяем, если пользователь хочет вернуться к предыдущему вопросу
-        if answer_text == "Вернуться к предыдущему вопросу":
-            return await go_to_previous_question(update, context)
-        
-        # Проверяем, если пользователь хочет завершить тест
-        if answer_text == "Завершить тест":
-            return await finish_test(update, context)
-        
-        # Проверяем, что ответ - одна из букв A, B, C, D
-        if answer_text not in letter_to_number:
-            await update.message.reply_text(
-                "Пожалуйста, выберите один из вариантов ответа (A, B, C, D)."
+        if not progress:
+            logging.error(f"Не найден прогресс для пользователя {user_id}")
+            await query.message.reply_text(
+                "Произошла ошибка при обработке ответа. Пожалуйста, начните тест заново с помощью /start",
+                parse_mode=ParseMode.MARKDOWN_V2
             )
-            return ANSWERING_QUESTIONS
+            return ConversationHandler.END
+        
+        # Получаем номер текущего вопроса
+        current_question = progress["current_question"]
+        
+        # Получаем маппинг букв на номера ответов
+        letter_to_number = progress["current_mapping"]
         
         # Получаем номер ответа по букве
-        answer_number = letter_to_number[answer_text]
+        answer_number = letter_to_number.get(answer_letter)
         
-        # Сохраняем ответ
-        answers.append(answer_number)
+        if answer_number is None:
+            logging.error(f"Не найден номер ответа для буквы {answer_letter}")
+            await query.message.reply_text(
+                "Произошла ошибка при обработке ответа. Пожалуйста, начните тест заново с помощью /start",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            return ConversationHandler.END
+        
+        # Сохраняем ответ пользователя
+        progress["answers"].append(answer_number)
         
         # Обновляем статистику ответов
-        answer_stats[str(answer_number)] = answer_stats.get(str(answer_number), 0) + 1
+        progress["answer_stats"][str(answer_number)] += 1
         
-        # Сохраняем ответ в базу данных
-        save_answer_to_db(user_id, current_question, str(answer_number))
+        # Логируем обновление статистики
+        logging.info(f"Обновлена статистика ответов для пользователя {user_id}: {progress['answer_stats']}")
+        
+        # Удаляем кнопки и показываем выбранный ответ
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+            response_message = await query.message.reply_text(
+                get_text("answer_selected", language).format(letter=answer_letter),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            # Сохраняем ID сообщения с выбранным ответом
+            progress["last_answer_message_id"] = response_message.message_id
+        except Exception as e:
+            logging.warning(f"Не удалось удалить кнопки: {e}")
+        
+        # Получаем вопросы для языка пользователя
+        language = get_user_language(user_id)
+        questions = get_questions_by_language(language)
+        
+        # Проверяем, был ли это последний вопрос
+        if current_question >= len(questions) - 1:
+            # Это был последний вопрос, показываем кнопки "Назад" и "Завершить тест"
+            keyboard = [
+                [InlineKeyboardButton(get_text("back_to_previous", language), callback_data="back_to_previous")],
+                [InlineKeyboardButton(get_text("finish_test", language), callback_data="finish_test")]
+            ]
+            
+            await query.message.reply_text(
+                escape_markdown_v2(get_text("last_question_answered", language)),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
+            # Сохраняем обновленный прогресс
+            save_user_progress(user_id, progress)
+            
+            return ANSWERING_QUESTIONS
         
         # Переходим к следующему вопросу
         current_question += 1
+        progress["current_question"] = current_question
         
-        # Проверяем, есть ли еще вопросы
-        if current_question >= len(ALL_QUESTIONS):
-            # Сохраняем обновленный прогресс
-            save_user_progress(user_id, {
-                "current_question": current_question,
-                "answers": answers,
-                "answer_stats": answer_stats,
-                "shuffled_options": shuffled_options
-            })
-            
-            # Создаем клавиатуру с кнопками для завершения теста
-            keyboard = [
-                ["Вернуться к предыдущему вопросу"],
-                ["Завершить тест"]
-            ]
-            
-            # Отправляем сообщение о завершении теста с клавиатурой
-            await update.message.reply_text(
-                "Вы ответили на все вопросы! Вы можете вернуться к предыдущему вопросу или завершить тест.",
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            )
-            
-            return ANSWERING_QUESTIONS
+        # Загружаем следующий вопрос
+        question = questions[current_question]
         
-        # Получаем следующий вопрос
-        question = ALL_QUESTIONS[current_question]
+        # Проверяем, есть ли сохраненный порядок вариантов для этого вопроса
+        if "question_options" not in progress:
+            progress["question_options"] = {}
         
-        # Форматируем следующий вопрос и получаем новый маппинг
-        formatted_text, letter_to_number, keyboard_letters, new_shuffled_options = format_question_with_options(question, current_question)
+        saved_options = progress["question_options"].get(str(current_question))
         
-        # Создаем клавиатуру с вариантами ответов по 2 в ряд
-        keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
+        # Форматируем вопрос и получаем маппинг ответов
+        formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(
+            question, 
+            current_question,
+            saved_options,
+            user_id=user_id
+        )
         
-        # Добавляем кнопку "Вернуться к предыдущему вопросу" только если это не первый вопрос
+        # Сохраняем порядок вариантов для этого вопроса, если его еще нет
+        if str(current_question) not in progress["question_options"]:
+            progress["question_options"][str(current_question)] = shuffled_options
+        
+        # Обновляем маппинг в прогрессе
+        progress["current_mapping"] = letter_to_number
+        progress["shuffled_options"] = shuffled_options
+        
+        # Сохраняем обновленный прогресс
+        save_user_progress(user_id, progress)
+        
+        # Создаем инлайн-клавиатуру с вариантами ответов по 2 в ряд
+        keyboard = []
+        for i in range(0, len(keyboard_letters), 2):
+            row = []
+            for j in range(i, min(i+2, len(keyboard_letters))):
+                letter = keyboard_letters[j]
+                row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
+            keyboard.append(row)
+        
+        # Добавляем кнопку "Назад" для всех вопросов, кроме первого
         if current_question > 0:
-            keyboard.append(["Вернуться к предыдущему вопросу"])
-        
-        # Сохраняем прогресс с новым маппингом
-        save_user_progress(user_id, {
-            "current_question": current_question,
-            "answers": answers,
-            "answer_stats": answer_stats,
-            "current_mapping": letter_to_number,
-            "shuffled_options": new_shuffled_options
-        })
+            keyboard.append([InlineKeyboardButton(get_text("back_to_previous", language), callback_data="back_to_previous")])
         
         # Отправляем следующий вопрос
-        await update.message.reply_text(
+        await query.message.reply_text(
             formatted_text,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
+        
         return ANSWERING_QUESTIONS
-    except Exception as e:
-        logging.error(f"Ошибка при обработке ответа: {str(e)}")
-        await update.message.reply_text(
-            "Произошла ошибка при обработке вашего ответа. Пожалуйста, попробуйте еще раз с помощью /start",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
+    
+    elif callback_data == "back_to_previous":
+        # Пользователь хочет вернуться к предыдущему вопросу
+        return await go_to_previous_question_inline(update, context)
+    
+    elif callback_data == "finish_test":
+        # Пользователь хочет завершить тест
+        return await finish_test_inline(update, context)
+    
+    return ANSWERING_QUESTIONS
 
-async def go_to_previous_question(update: Update, context: CallbackContext) -> int:
+async def go_to_previous_question_inline(update: Update, context: CallbackContext) -> int:
     """
     Возвращает пользователя к предыдущему вопросу
     """
-    try:
-        user_id = update.message.from_user.id
-        
-        # Загружаем прогресс пользователя
-        progress = load_user_progress(user_id)
-        current_question = progress.get("current_question", 0)
-        answers = progress.get("answers", [])
-        answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
-        shuffled_options_history = progress.get("shuffled_options_history", {})
-        
-        # Проверяем, можно ли вернуться к предыдущему вопросу
-        if current_question <= 0 or len(answers) == 0:
-            await update.message.reply_text(
-                "Вы находитесь на первом вопросе, невозможно вернуться назад."
-            )
-            
-            # Повторно отправляем текущий вопрос
-            question = ALL_QUESTIONS[current_question]
-            formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question, progress.get("shuffled_options"))
-            
-            # Создаем клавиатуру с вариантами ответов по 2 в ряд
-            keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
-            
-            # Сохраняем маппинг
-            save_user_progress(user_id, {
-                "current_question": current_question,
-                "answers": answers,
-                "answer_stats": answer_stats,
-                "current_mapping": letter_to_number,
-                "shuffled_options": shuffled_options
-            })
-            
-            await update.message.reply_text(
-                formatted_text,
-                parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            )
-            return ANSWERING_QUESTIONS
-        
-        # Удаляем последний ответ из списка ответов
-        last_answer = answers.pop()
-        
-        # Уменьшаем счетчик для этого ответа в статистике
-        if last_answer in answer_stats:
-            answer_stats[last_answer] = max(0, answer_stats[last_answer] - 1)
-        
-        # Возвращаемся к предыдущему вопросу
-        current_question -= 1
-        
-        # Получаем предыдущий вопрос
-        question = ALL_QUESTIONS[current_question]
-        
-        # Получаем сохраненный порядок вариантов для этого вопроса
-        saved_options = progress.get("shuffled_options")
-        
-        # Форматируем вопрос и получаем новый маппинг, используя сохраненный порядок
-        formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question, saved_options)
-        
-        # Создаем клавиатуру с вариантами ответов по 2 в ряд
-        keyboard = [keyboard_letters[i:i+2] for i in range(0, len(keyboard_letters), 2)]
-        
-        # Добавляем кнопку "Вернуться к предыдущему вопросу" только если это не первый вопрос
-        if current_question > 0:
-            keyboard.append(["Вернуться к предыдущему вопросу"])
-        
-        # Сохраняем обновленный прогресс
-        save_user_progress(user_id, {
-            "current_question": current_question,
-            "answers": answers,
-            "answer_stats": answer_stats,
-            "current_mapping": letter_to_number,
-            "shuffled_options": shuffled_options
-        })
-        
-        # Отправляем предыдущий вопрос
-        await update.message.reply_text(
-            formatted_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    query = update.callback_query
+    user_id = query.from_user.id
+    language = get_user_language(user_id)
+    
+    # Получаем текущий прогресс пользователя
+    progress = load_user_progress(user_id)
+    
+    if not progress:
+        logging.error(f"Не найден прогресс для пользователя {user_id}")
+        await query.message.reply_text(
+            escape_markdown_v2(get_text("no_previous_question", language)),
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         return ANSWERING_QUESTIONS
-    except Exception as e:
-        logging.error(f"Ошибка при возврате к предыдущему вопросу: {str(e)}")
-        await update.message.reply_text(
-            "Произошла ошибка. Пожалуйста, попробуйте еще раз с помощью /start",
-            reply_markup=ReplyKeyboardRemove()
+    
+    # Получаем текущий вопрос
+    current_question = progress["current_question"]
+    
+    # Проверяем, что это не первый вопрос
+    if current_question <= 0:
+        await query.message.reply_text(
+            escape_markdown_v2(get_text("no_previous_question", language)),
+            parse_mode=ParseMode.MARKDOWN_V2
         )
-        return ConversationHandler.END
+        return ANSWERING_QUESTIONS
+    
+    # Пытаемся удалить сообщение с выбранным ответом
+    if "last_answer_message_id" in progress:
+        try:
+            await context.bot.delete_message(
+                chat_id=user_id,
+                message_id=progress["last_answer_message_id"]
+            )
+            logging.info(f"Удалено сообщение с выбранным ответом (ID: {progress['last_answer_message_id']})")
+            # Удаляем ID сообщения из прогресса
+            del progress["last_answer_message_id"]
+        except Exception as e:
+            logging.warning(f"Не удалось удалить сообщение с выбранным ответом: {e}")
+    
+    # Удаляем последний ответ из списка ответов
+    if progress["answers"]:
+        last_answer = progress["answers"].pop()
+        # Уменьшаем счетчик для этого типа ответа
+        progress["answer_stats"][str(last_answer)] -= 1
+    
+    # Получаем вопросы для языка пользователя
+    language = get_user_language(user_id)
+    questions = get_questions_by_language(language)
+    
+    # Переходим к предыдущему вопросу
+    current_question -= 1
+    progress["current_question"] = current_question
+    
+    # Загружаем предыдущий вопрос
+    question = questions[current_question]
+    
+    # Проверяем, есть ли сохраненный порядок вариантов для этого вопроса
+    # Для этого нам нужно сохранять порядок вариантов для каждого вопроса
+    if "question_options" not in progress:
+        progress["question_options"] = {}
+    
+    saved_options = progress["question_options"].get(str(current_question))
+    
+    # Форматируем вопрос и получаем маппинг ответов
+    formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(
+        question, 
+        current_question,
+        saved_options,
+        user_id=user_id
+    )
+    
+    # Сохраняем порядок вариантов для этого вопроса, если его еще нет
+    if str(current_question) not in progress["question_options"]:
+        progress["question_options"][str(current_question)] = shuffled_options
+    
+    # Обновляем маппинг в прогрессе
+    progress["current_mapping"] = letter_to_number
+    progress["shuffled_options"] = shuffled_options
+    
+    # Сохраняем обновленный прогресс
+    save_user_progress(user_id, progress)
+    
+    # Создаем инлайн-клавиатуру с вариантами ответов по 2 в ряд
+    keyboard = []
+    for i in range(0, len(keyboard_letters), 2):
+        row = []
+        for j in range(i, min(i+2, len(keyboard_letters))):
+            letter = keyboard_letters[j]
+            row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
+        keyboard.append(row)
+    
+    # Добавляем кнопку "Назад" для всех вопросов, кроме первого
+    if current_question > 0:
+        keyboard.append([InlineKeyboardButton(get_text("back_to_previous", language), callback_data="back_to_previous")])
+    
+    # Отправляем предыдущий вопрос
+    await query.message.reply_text(
+        formatted_text,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    
+    return ANSWERING_QUESTIONS
 
 async def handle_admin_response(update: Update, context: CallbackContext) -> None:
     """
@@ -728,13 +839,27 @@ async def handle_admin_response(update: Update, context: CallbackContext) -> Non
 
 async def test_message(update: Update, context: CallbackContext) -> None:
     """
-    Тестовая команда для проверки отправки сообщений администратору
+    Тестовая функция для отправки сообщения
     """
-
-    try:
-        logging.info(f"Тестовая отправка сообщения администратору (ID: {ADMIN_ID})")
-    except Exception as e:
-        logging.error(f"Ошибка при отправке тестового сообщения: {str(e)}")
+    user_id = update.message.from_user.id
+    language = get_text("language", user_id)
+    
+    # Создаем инлайн-клавиатуру с вариантами ответов
+    keyboard = []
+    keyboard_letters = ["A", "B", "C", "D"]
+    for i in range(0, len(keyboard_letters), 2):
+        row = []
+        for j in range(i, min(i+2, len(keyboard_letters))):
+            letter = keyboard_letters[j]
+            row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
+        keyboard.append(row)
+    
+    # Отправляем вопрос пользователю
+    await update.message.reply_text(
+        f"1. Тестовый вопрос\n\n"
+        "Выберите один из вариантов:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def handle_admin_decision(update: Update, context: CallbackContext) -> None:
     """
@@ -774,8 +899,7 @@ async def handle_admin_decision(update: Update, context: CallbackContext) -> Non
                 parse_mode=ParseMode.MARKDOWN_V2
             )
             await update.message.reply_text(
-                f"✅ Ответ успешно отправлен пользователю (ID: {user_id})",
-                reply_markup=ReplyKeyboardRemove()
+                f"✅ Ответ успешно отправлен пользователю (ID: {user_id})"
             )
         except Exception as e:
             if "bot can't initiate conversation with a user" in str(e):
@@ -801,6 +925,11 @@ def escape_markdown_v2(text):
     if not text:
         return ""
     
+    # Проверяем, является ли текст сообщением с результатами теста
+    if text.startswith("Спасибо за прохождение тестов") or text.startswith("Thank you for completing the tests"):
+        # Для сообщения с результатами теста не применяем экранирование
+        return text
+    
     # Список специальных символов, которые нужно экранировать
     special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     
@@ -809,6 +938,44 @@ def escape_markdown_v2(text):
         text = text.replace(char, f"\\{char}")
     
     return text
+
+def format_test_results_message(user_id, language):
+    """
+    Формирует сообщение с результатами теста на основе статистики ответов пользователя
+    """
+    # Получаем статистику ответов пользователя
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT answers, answer_stats FROM test_results WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if not result:
+        # Если результаты не найдены, возвращаем стандартное сообщение
+        return get_text("results_received", language)
+    
+    # Получаем базовый шаблон сообщения
+    message_template = get_text("results_received", language)
+    
+    # Получаем статистику ответов
+    answer_stats = json.loads(result[1])
+    total_answers = sum(answer_stats.values())
+    
+    # Формируем строки с результатами
+    if language == "ru":
+        # Для русского языка
+        message = message_template.replace("<b>Ранняя фаза</b>", f"<b>Ответов {answer_stats.get('1', 0)} ({(answer_stats.get('1', 0) / total_answers * 100) if total_answers > 0 else 0:.0f}%) Ранняя фаза</b>")
+        message = message.replace("<b>Средняя фаза</b>", f"<b>Ответов {answer_stats.get('2', 0)} ({(answer_stats.get('2', 0) / total_answers * 100) if total_answers > 0 else 0:.0f}%) Средняя фаза</b>")
+        message = message.replace("<b>Поздняя фаза</b>", f"<b>Ответов {answer_stats.get('3', 0)} ({(answer_stats.get('3', 0) / total_answers * 100) if total_answers > 0 else 0:.0f}%) Поздняя фаза</b>")
+        message = message.replace("<b>Переход к жёлтому</b>", f"<b>Ответов {answer_stats.get('4', 0)} ({(answer_stats.get('4', 0) / total_answers * 100) if total_answers > 0 else 0:.0f}%) Переход к жёлтому</b>")
+    else:
+        # Для английского языка
+        message = message_template.replace("<b>Early phase</b>", f"<b>Answers {answer_stats.get('1', 0)} ({(answer_stats.get('1', 0) / total_answers * 100) if total_answers > 0 else 0:.0f}%) Early phase</b>")
+        message = message.replace("<b>Middle phase</b>", f"<b>Answers {answer_stats.get('2', 0)} ({(answer_stats.get('2', 0) / total_answers * 100) if total_answers > 0 else 0:.0f}%) Middle phase</b>")
+        message = message.replace("<b>Late phase</b>", f"<b>Answers {answer_stats.get('3', 0)} ({(answer_stats.get('3', 0) / total_answers * 100) if total_answers > 0 else 0:.0f}%) Late phase</b>")
+        message = message.replace("<b>Transition to Yellow</b>", f"<b>Answers {answer_stats.get('4', 0)} ({(answer_stats.get('4', 0) / total_answers * 100) if total_answers > 0 else 0:.0f}%) Transition to Yellow</b>")
+    
+    return message
 
 async def finish_test(update: Update, context: CallbackContext) -> int:
     """
@@ -842,7 +1009,6 @@ async def finish_test(update: Update, context: CallbackContext) -> int:
         await update.message.reply_text(
             results_message,
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=ReplyKeyboardRemove(),
             disable_web_page_preview=True
         )
         
@@ -853,106 +1019,121 @@ async def finish_test(update: Update, context: CallbackContext) -> int:
     except Exception as e:
         logging.error(f"Ошибка при завершении теста: {str(e)}")
         await update.message.reply_text(
-            "Произошла ошибка при обработке результатов теста. Пожалуйста, попробуйте еще раз с помощью /start",
-            reply_markup=ReplyKeyboardRemove()
+            "Произошла ошибка при обработке результатов теста. Пожалуйста, попробуйте еще раз с помощью /start"
         )
         return ConversationHandler.END
 
 async def handle_second_test_results(update: Update, context: CallbackContext) -> int:
     """
-    Обрабатывает получение скриншота со вторым тестом
+    Обрабатывает результаты второго теста (скриншот)
     """
-    try:
-        # Проверяем, отправил ли пользователь фото или документ
-        photo_file = None
+    user_id = update.message.from_user.id
+    language = get_user_language(user_id)
+    
+    logging.info(f"Получен результат второго теста от пользователя {user_id}")
+    
+    # Проверяем, что пользователь отправил фото или документ
+    if update.message.photo or update.message.document:
+        # Получаем информацию о пользователе
+        username = update.message.from_user.username or ""
+        first_name = update.message.from_user.first_name or ""
         
+        logging.info(f"Пользователь {user_id} отправил фото или документ")
+        
+        # Создаем директорию для скриншотов, если она не существует
+        os.makedirs("data/screenshots", exist_ok=True)
+        
+        # Сохраняем скриншот
+        file_path = ""
         if update.message.photo:
-            # Получаем файл с наибольшим разрешением
-            photo_file = await update.message.photo[-1].get_file()
-            logging.info(f"Получено фото от пользователя {update.message.from_user.id}")
-        elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith('image/'):
-            # Получаем документ, если это изображение
-            photo_file = await update.message.document.get_file()
-            logging.info(f"Получен документ-изображение от пользователя {update.message.from_user.id}")
-        
-        if not photo_file:
-            # Если пользователь отправил текст или другой тип файла
-            await update.message.reply_text(
-                "Пожалуйста, отправьте скриншот с результатами второго теста в виде изображения.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return WAITING_FOR_SECOND_TEST
-
-        user_id = update.message.from_user.id
-        
-        # Загружаем результаты первого теста и обновляем статистику последнего ответа
-        progress = load_user_progress(user_id)
-        answers = progress.get("answers", [])
-        answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
-        
-        # Сохраняем обновленную статистику
-        save_user_progress(user_id, {
-            "current_question": len(answers),
-            "answers": answers,
-            "answer_stats": answer_stats
-        })
-
-        # Рассчитываем общее количество ответов
-        total_answers = sum(int(count) for count in answer_stats.values())
-        
-        # Формируем статистику с процентами
-        stats_text = ""
-        for key in sorted(answer_stats.keys()):
-            count = int(answer_stats[key])
-            percent = (count / total_answers * 100) if total_answers > 0 else 0
-            stats_text += f"{key}: {count} ({percent:.1f}%)\n"
-
-        # Отправляем уведомление администратору с результатами обоих тестов
-        admin_message = (
-            f"📊 Новые результаты тестов!\n\n"
-            f"Пользователь: {update.message.from_user.first_name}"
-            f" (@{update.message.from_user.username})\n"
-            f"ID: {user_id}\n\n"
-            f"Результаты первого теста:\n"
-            f"{stats_text}\n"
-            f"Скриншот второго теста прикреплен выше."
-        )
-
-        # Создаем инлайн-клавиатуру с кнопками для администратора
-        admin_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
-                InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
-            ]
-        ])
-        
-        try:
-            await context.bot.send_photo(
-                chat_id=ADMIN_ID,
-                photo=photo_file.file_id,
-                caption=admin_message,
-                reply_markup=admin_keyboard
-            )
-        except Exception as e:
-            logging.error(f"Ошибка при отправке скриншота администратору: {str(e)}")
-        
-        # Отправляем сообщение пользователю
-        await update.message.reply_text(
-            "Спасибо за прохождение тестов! Мы получили ваши результаты и свяжемся в ближайшее время.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+            # Получаем фото с наилучшим качеством
+            photo = update.message.photo[-1]
+            file_id = photo.file_id
+            
+            # Скачиваем фото
+            file = await context.bot.get_file(file_id)
+            file_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+            await file.download_to_drive(file_path)
+            
+            logging.info(f"Сохранен скриншот от пользователя {user_id}: {file_path}")
+        else:
+            # Получаем документ
+            document = update.message.document
+            file_id = document.file_id
+            
+            # Проверяем, что это изображение
+            mime_type = document.mime_type
+            if not mime_type or not mime_type.startswith("image/"):
+                logging.info(f"Пользователь {user_id} отправил документ, который не является изображением")
+                await update.message.reply_text(
+                    escape_markdown_v2(get_text("not_image", language)),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+                return WAITING_FOR_SECOND_TEST
+            
+            # Скачиваем документ
+            file = await context.bot.get_file(file_id)
+            file_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+            await file.download_to_drive(file_path)
+            
+            logging.info(f"Сохранен скриншот от пользователя {user_id}: {file_path}")
         
         # Обновляем статус теста
-        update_test_status(user_id, "completed_second_test")
+        try:
+            update_test_status(user_id, "completed")
+            logging.info(f"Обновлен статус теста для пользователя {user_id}: completed")
+        except Exception as e:
+            logging.error(f"Ошибка при обновлении статуса теста: {e}")
+        
+        # Отправляем сообщение пользователю сразу
+        try:
+            logging.info(f"Отправляем сообщение пользователю {user_id}")
+            message_text = format_test_results_message(user_id, language)
+            await update.message.reply_text(
+                message_text,
+                parse_mode=ParseMode.HTML
+            )
+            logging.info(f"Отправлено сообщение пользователю {user_id}")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
+        
+        # Отправляем сообщение администраторам
+        logging.info(f"Отправляем сообщение администраторам: {ADMIN_IDS}")
+        for admin_id in ADMIN_IDS:
+            try:
+                logging.info(f"Отправляем сообщение администратору {admin_id}")
+                
+                # Создаем простое сообщение для администратора
+                admin_message = f"Пользователь {username} (@{username}) с ID {user_id} завершил тестирование."
+                
+                # Отправляем текстовое сообщение администратору
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_message
+                )
+                
+                # Отправляем скриншот администратору отдельным сообщением
+                if os.path.exists(file_path):
+                    with open(file_path, "rb") as photo_file:
+                        await context.bot.send_photo(
+                            chat_id=admin_id,
+                            photo=photo_file,
+                            caption=f"Скриншот от пользователя {username} (ID: {user_id})"
+                        )
+                
+                logging.info(f"Отправлено уведомление администратору {admin_id} о завершении теста пользователем {user_id}")
+            except Exception as e:
+                logging.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
         
         return ConversationHandler.END
-    except Exception as e:
-        logging.error(f"Ошибка при обработке результатов второго теста: {str(e)}")
+    else:
+        # Если пользователь отправил текст, а не фото
+        logging.info(f"Пользователь {user_id} отправил текст вместо фото")
         await update.message.reply_text(
-            "Произошла ошибка. Пожалуйста, попробуйте еще раз с помощью /start",
-            reply_markup=ReplyKeyboardRemove()
+            escape_markdown_v2(get_text("send_screenshot", language)),
+            parse_mode=ParseMode.MARKDOWN_V2
         )
-        return ConversationHandler.END
+        return WAITING_FOR_SECOND_TEST
 
 def create_backup():
     """
@@ -991,20 +1172,19 @@ async def handle_admin_callback(update: Update, context: CallbackContext) -> Non
         action, user_id = data.split("_")
         user_id = int(user_id)
         
+        # Получаем язык пользователя
+        language = get_user_language(user_id)
+        
         if action == "accept":
             status = "Принят"
-            message = (
-                "🎊 *Поздравляем\\! Вы приняты в программу Welcome to Tier 2\\!*\n\n"
-                "Для начала работы и согласования расписания, пожалуйста, запишитесь на вводную встречу:\n"
-                f"{escape_markdown_v2(CALENDLY_LINK)}"
+            # Используем локализованное сообщение
+            message = get_text("accepted_message", language).format(
+                calendly_link=escape_markdown_v2(CALENDLY_LINK)
             )
         elif action == "reject":
             status = "Отклонен"
-            message = (
-                "*Спасибо за интерес к нашей программе\\!*\n\n"
-                "К сожалению, на данном этапе мы не можем предложить вам участие в программе\\.\n"
-                "Рекомендуем продолжить работу над собой и попробовать снова через некоторое время\\."
-            )
+            # Используем локализованное сообщение
+            message = get_text("rejected_message", language)
         else:
             return
         
@@ -1019,16 +1199,12 @@ async def handle_admin_callback(update: Update, context: CallbackContext) -> Non
             # Обновляем сообщение администратора, чтобы показать, что решение принято
             await query.edit_message_reply_markup(reply_markup=None)
             await query.message.reply_text(
-                f"✅ Пользователь {status} (ID: {user_id})"
+                get_text(f"user_{action}ed", language).format(user_id=user_id)
             )
         except Exception as e:
             if "bot can't initiate conversation with a user" in str(e):
                 await query.message.reply_text(
-                    f"❌ Не удалось отправить ответ пользователю\\. Он еще не начал диалог с ботом\\.\n\n"
-                    f"*Необходимые действия:*\n"
-                    f"1\\. Попросите пользователя перейти в @{BOT_USERNAME}\n"
-                    f"2\\. Нажать START или отправить команду /start\n"
-                    f"3\\. После этого повторите отправку ответа той же командой",
+                    escape_markdown_v2(get_text("error_sending_to_admin", language).format(bot_username=BOT_USERNAME)),
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
             else:
@@ -1037,19 +1213,559 @@ async def handle_admin_callback(update: Update, context: CallbackContext) -> Non
         logging.error(f"Ошибка при обработке callback: {str(e)}")
         await query.message.reply_text(f"Произошла ошибка: {str(e)}")
 
+async def handle_language_callback(update: Update, context: CallbackContext) -> int:
+    """
+    Обрабатывает выбор языка через инлайн-кнопки
+    """
+    query = update.callback_query
+    await query.answer()  # Отвечаем на запрос, чтобы убрать часы загрузки
+    
+    user_id = query.from_user.id
+    callback_data = query.data
+    
+    # Проверяем, что это callback для выбора языка
+    if not callback_data.startswith("lang_"):
+        return
+    
+    logging.info(f"Получен выбор языка от пользователя {user_id}: {callback_data}")
+    
+    if callback_data == "lang_ru":
+        language = "ru"
+        logging.info(f"Выбран русский язык")
+    elif callback_data == "lang_en":
+        language = "en"
+        logging.info(f"Выбран английский язык")
+    else:
+        # По умолчанию используем русский
+        language = "ru"
+        logging.info(f"Язык не распознан, используем русский по умолчанию")
+    
+    try:
+        # Сохраняем выбранный язык
+        save_user_language(user_id, language)
+        logging.info(f"Сохранен язык пользователя {user_id}: {language}")
+        
+        # Отправляем сообщение о выбранном языке
+        await query.edit_message_text(
+            get_text("language_selected", language)
+        )
+        logging.info(f"Отправлено сообщение о выбранном языке")
+        
+        # Отправляем приветственное сообщение
+        welcome_message = get_text("welcome", language)
+        logging.info(f"Подготовлено приветственное сообщение")
+        
+        # Отправляем приветственное сообщение
+        await query.message.reply_text(
+            f"{welcome_message}",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        
+        # Создаем инлайн-клавиатуру с кнопкой для начала теста
+        keyboard = [
+            [InlineKeyboardButton(get_text("take_test", language), callback_data="start_test")],
+            [InlineKeyboardButton(get_text("no_thanks", language), callback_data="choice_no")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        logging.info(f"Создана инлайн-клавиатура с кнопкой для начала теста")
+        
+        # Отправляем сообщение с кнопкой для начала теста
+        await query.message.reply_text(
+            get_text("start_question", language),
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        logging.info(f"Отправлено сообщение с кнопкой для начала теста")
+        
+        return WAITING_FOR_TEST_CHOICE
+    except Exception as e:
+        logging.error(f"Ошибка при обработке выбора языка: {e}")
+        # В случае ошибки отправляем сообщение об ошибке
+        await query.message.reply_text(
+            f"Произошла ошибка при обработке выбора языка: {e}. Пожалуйста, попробуйте еще раз с помощью /start"
+        )
+        return ConversationHandler.END
+
+async def handle_choice_callback(update: Update, context: CallbackContext) -> int:
+    """
+    Обрабатывает выбор пользователя через инлайн-кнопки
+    """
+    query = update.callback_query
+    await query.answer()  # Отвечаем на запрос, чтобы убрать часы загрузки
+    
+    user_id = query.from_user.id
+    callback_data = query.data
+    language = get_user_language(user_id)
+    
+    logging.info(f"Получен выбор от пользователя {user_id}: {callback_data}")
+    
+    if callback_data == "choice_yes":
+        # Пользователь выбрал "Да, хочу узнать больше"
+        logging.info(f"Пользователь выбрал 'Да, хочу узнать больше'")
+        
+        # Создаем инлайн-клавиатуру с кнопками "Начать первый тест" и "Отказаться"
+        keyboard = [
+            [InlineKeyboardButton(get_text("take_test", language), callback_data="start_test")],
+            [InlineKeyboardButton(get_text("no_thanks", language), callback_data="choice_no")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Удаляем предыдущее сообщение с кнопками
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e:
+            logging.warning(f"Не удалось удалить кнопки: {e}")
+        
+        await query.message.reply_text(
+            get_text("start_question", language),
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        logging.info(f"Отправлено сообщение о необходимости пройти два теста")
+        
+        return WAITING_FOR_TEST_CHOICE
+    
+    elif callback_data == "start_test":
+        # Пользователь выбрал "Пройти тест"
+        logging.info(f"Пользователь выбрал 'Пройти тест'")
+        
+        # Удаляем предыдущее сообщение с кнопками
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e:
+            logging.warning(f"Не удалось удалить кнопки: {e}")
+        
+        return await start_test_inline(update, context)
+    
+    elif callback_data == "choice_no":
+        # Если пользователь отказался, благодарим за интерес
+        thanks_message = escape_markdown_v2(get_text("thanks_for_interest", language))
+        
+        # Удаляем предыдущее сообщение с кнопками
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e:
+            logging.warning(f"Не удалось удалить кнопки: {e}")
+        
+        await query.message.reply_text(
+            thanks_message,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return ConversationHandler.END
+    
+    return WAITING_FOR_TEST_CHOICE
+
+async def start_test_inline(update: Update, context: CallbackContext) -> int:
+    """
+    Начинает тест после нажатия на инлайн-кнопку
+    """
+    query = update.callback_query
+    user_id = query.from_user.id
+    language = get_user_language(user_id)
+    
+    # Очищаем прогресс пользователя перед началом теста
+    clear_user_progress(user_id)
+    
+    # Загружаем первый вопрос
+    current_question = 0
+    questions = get_questions_by_language(language)
+    question = questions[current_question]
+    
+    # Форматируем вопрос и получаем маппинг ответов
+    formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question, user_id=user_id)
+    
+    # Создаем инлайн-клавиатуру с вариантами ответов по 2 в ряд
+    keyboard = []
+    for i in range(0, len(keyboard_letters), 2):
+        row = []
+        for j in range(i, min(i+2, len(keyboard_letters))):
+            letter = keyboard_letters[j]
+            row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
+        keyboard.append(row)
+    
+    # Для первого вопроса не добавляем кнопку "Назад"
+    
+    # Сохраняем начальное состояние с маппингом
+    save_user_progress(user_id, {
+        "current_question": 0,
+        "answers": [],
+        "answer_stats": {"1": 0, "2": 0, "3": 0, "4": 0},
+        "current_mapping": letter_to_number,
+        "shuffled_options": shuffled_options,
+        "question_options": {"0": shuffled_options}  # Сохраняем порядок вариантов для первого вопроса
+    })
+    
+    # Отправляем первый вопрос
+    await query.message.reply_text(
+        formatted_text,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ANSWERING_QUESTIONS
+
+async def finish_test_inline(update: Update, context: CallbackContext) -> int:
+    """
+    Завершает тест и показывает результаты после инлайн-кнопок
+    """
+    query = update.callback_query
+    user_id = query.from_user.id
+    language = get_user_language(user_id)
+    
+    # Получаем прогресс пользователя
+    progress = load_user_progress(user_id)
+    
+    if not progress:
+        logging.error(f"Не найден прогресс для пользователя {user_id}")
+        await query.message.reply_text(
+            "Произошла ошибка при обработке результатов теста. Пожалуйста, начните тест заново с помощью /start",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return ConversationHandler.END
+    
+    # Получаем статистику ответов
+    answer_stats = progress["answer_stats"]
+    
+    # Получаем вопросы для языка пользователя
+    language = get_user_language(user_id)
+    questions = get_questions_by_language(language)
+    
+    # Проверяем, что количество ответов соответствует количеству вопросов
+    answers = progress["answers"]
+    if len(answers) < len(questions):
+        logging.warning(f"Количество ответов ({len(answers)}) меньше количества вопросов ({len(questions)})")
+        logging.info(f"Ответы пользователя: {answers}")
+    
+    # Определяем преобладающий тип ответов
+    max_count = 0
+    dominant_type = None
+    
+    for answer_type, count in answer_stats.items():
+        if count > max_count:
+            max_count = count
+            dominant_type = answer_type
+    
+    # Отправляем сообщение о втором этапе с инструкциями
+    first_test_completed_message = get_text("first_test_completed", language)
+    
+    await query.message.reply_text(
+        first_test_completed_message,
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+    
+    # Сохраняем результат теста
+    save_test_result(user_id, dominant_type)
+    
+    # Получаем информацию о пользователе
+    username = query.from_user.username or ""
+    first_name = query.from_user.first_name or ""
+    
+    # Сохраняем результаты теста в базу данных
+    save_test_results(user_id, username, first_name, progress["answers"], answer_stats)
+    
+    return WAITING_FOR_SECOND_TEST
+
+async def handle_photo(update: Update, context: CallbackContext) -> None:
+    """
+    Обрабатывает фотографии, отправленные пользователем
+    """
+    user_id = update.message.from_user.id
+    language = get_user_language(user_id)
+    
+    logging.info(f"Получена фотография от пользователя {user_id}")
+    
+    # Получаем информацию о пользователе
+    username = update.message.from_user.username or ""
+    first_name = update.message.from_user.first_name or ""
+    
+    # Создаем директорию для скриншотов, если она не существует
+    os.makedirs("data/screenshots", exist_ok=True)
+    
+    # Получаем фото с наилучшим качеством
+    photo = update.message.photo[-1]
+    file_id = photo.file_id
+    
+    # Скачиваем фото
+    try:
+        file = await context.bot.get_file(file_id)
+        file_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+        await file.download_to_drive(file_path)
+        
+        logging.info(f"Сохранен скриншот от пользователя {user_id}: {file_path}")
+        
+        # Обновляем статус теста
+        update_test_status(user_id, "completed")
+        logging.info(f"Обновлен статус теста для пользователя {user_id}: completed")
+        
+        # Отправляем сообщение пользователю
+        message_text = format_test_results_message(user_id, language)
+        await update.message.reply_text(
+            message_text,
+            parse_mode=ParseMode.HTML
+        )
+        logging.info(f"Отправлено сообщение пользователю {user_id}")
+        
+        # Отправляем сообщение администратору
+        for admin_id in ADMIN_IDS:
+            try:
+                # Создаем инлайн-клавиатуру для принятия/отклонения
+                keyboard = [
+                    [
+                        InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
+                        InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
+                    ]
+                ]
+                admin_keyboard = InlineKeyboardMarkup(keyboard)
+                
+                # Получаем статистику ответов пользователя
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT answers, answer_stats FROM test_results WHERE user_id = ?", (user_id,))
+                result = cursor.fetchone()
+                conn.close()
+                
+                stats_text = ""
+                if result:
+                    answer_stats = json.loads(result[1])
+                    
+                    # Проверяем, что все ответы учтены в статистике
+                    answers = json.loads(result[0])
+                    logging.info(f"Ответы пользователя {user_id}: {answers}")
+                    logging.info(f"Статистика ответов до проверки: {answer_stats}")
+                    
+                    # Убеждаемся, что каждый ответ учтен в статистике
+                    for answer in answers:
+                        if answer not in answer_stats:
+                            answer_stats[answer] = 0
+                        
+                    # Проверяем, что сумма значений в статистике равна количеству ответов
+                    total_answers = sum(answer_stats.values())
+                    if total_answers != len(answers):
+                        logging.warning(f"Количество ответов в статистике ({total_answers}) не соответствует количеству ответов пользователя ({len(answers)})")
+                        
+                        # Пересчитываем статистику на основе ответов
+                        answer_stats = {"1": 0, "2": 0, "3": 0, "4": 0}
+                        for answer in answers:
+                            # Убеждаемся, что ответ - это строка, содержащая только цифру
+                            if isinstance(answer, str) and answer.isdigit() and answer in answer_stats:
+                                answer_stats[answer] += 1
+                            elif isinstance(answer, int) or (isinstance(answer, str) and answer.isdigit()):
+                                # Преобразуем числовой ответ в строковый ключ
+                                answer_key = str(answer)
+                                if answer_key in answer_stats:
+                                    answer_stats[answer_key] += 1
+                                else:
+                                    logging.warning(f"Неизвестный тип ответа: {answer}")
+                            else:
+                                logging.warning(f"Неизвестный формат ответа: {answer}, тип: {type(answer)}")
+                        
+                        logging.info(f"Статистика ответов после пересчета: {answer_stats}")
+                        
+                        # Обновляем статистику в базе данных
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE test_results SET answer_stats = ? WHERE user_id = ?",
+                            (json.dumps(answer_stats), user_id)
+                        )
+                        conn.commit()
+                        conn.close()
+                    
+                    total_answers = sum(answer_stats.values())
+                    
+                    # Формируем статистику в нужном формате
+                    for answer_type in sorted(answer_stats.keys()):
+                        count = answer_stats[answer_type]
+                        percentage = (count / total_answers) * 100 if total_answers > 0 else 0
+                        stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
+                
+                # Создаем сообщение для администратора
+                admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+                
+                # Отправляем скриншот администратору
+                with open(file_path, "rb") as photo_file:
+                    await context.bot.send_photo(
+                        chat_id=admin_id,
+                        photo=photo_file,
+                        caption=admin_message,
+                        reply_markup=admin_keyboard
+                    )
+                
+                logging.info(f"Отправлено уведомление администратору {admin_id} о завершении теста пользователем {user_id}")
+            except Exception as e:
+                logging.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
+    
+    except Exception as e:
+        logging.error(f"Ошибка при обработке фотографии: {e}")
+        await update.message.reply_text(
+            "Произошла ошибка при обработке фотографии. Пожалуйста, попробуйте еще раз.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+async def handle_document(update: Update, context: CallbackContext) -> None:
+    """
+    Обрабатывает документы, отправленные пользователем
+    """
+    user_id = update.message.from_user.id
+    language = get_user_language(user_id)
+    
+    logging.info(f"Получен документ от пользователя {user_id}")
+    
+    # Получаем информацию о пользователе
+    username = update.message.from_user.username or ""
+    first_name = update.message.from_user.first_name or ""
+    
+    # Проверяем, что это изображение
+    document = update.message.document
+    mime_type = document.mime_type
+    
+    if not mime_type or not mime_type.startswith("image/"):
+        logging.info(f"Пользователь {user_id} отправил документ, который не является изображением")
+        await update.message.reply_text(
+            escape_markdown_v2(get_text("not_image", language)),
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return
+    
+    # Создаем директорию для скриншотов, если она не существует
+    os.makedirs("data/screenshots", exist_ok=True)
+    
+    # Скачиваем документ
+    try:
+        file_id = document.file_id
+        file = await context.bot.get_file(file_id)
+        file_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+        await file.download_to_drive(file_path)
+        
+        logging.info(f"Сохранен скриншот от пользователя {user_id}: {file_path}")
+        
+        # Обновляем статус теста
+        update_test_status(user_id, "completed")
+        logging.info(f"Обновлен статус теста для пользователя {user_id}: completed")
+        
+        # Отправляем сообщение пользователю
+        message_text = format_test_results_message(user_id, language)
+        await update.message.reply_text(
+            message_text,
+            parse_mode=ParseMode.HTML
+        )
+        logging.info(f"Отправлено сообщение пользователю {user_id}")
+        
+        # Отправляем сообщение администратору
+        for admin_id in ADMIN_IDS:
+            try:
+                # Создаем инлайн-клавиатуру для принятия/отклонения
+                keyboard = [
+                    [
+                        InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
+                        InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
+                    ]
+                ]
+                admin_keyboard = InlineKeyboardMarkup(keyboard)
+                
+                # Получаем статистику ответов пользователя
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT answers, answer_stats FROM test_results WHERE user_id = ?", (user_id,))
+                result = cursor.fetchone()
+                conn.close()
+                
+                stats_text = ""
+                if result:
+                    answer_stats = json.loads(result[1])
+                    
+                    # Проверяем, что все ответы учтены в статистике
+                    answers = json.loads(result[0])
+                    logging.info(f"Ответы пользователя {user_id}: {answers}")
+                    logging.info(f"Статистика ответов до проверки: {answer_stats}")
+                    
+                    # Убеждаемся, что каждый ответ учтен в статистике
+                    for answer in answers:
+                        if answer not in answer_stats:
+                            answer_stats[answer] = 0
+                        
+                    # Проверяем, что сумма значений в статистике равна количеству ответов
+                    total_answers = sum(answer_stats.values())
+                    if total_answers != len(answers):
+                        logging.warning(f"Количество ответов в статистике ({total_answers}) не соответствует количеству ответов пользователя ({len(answers)})")
+                        
+                        # Пересчитываем статистику на основе ответов
+                        answer_stats = {"1": 0, "2": 0, "3": 0, "4": 0}
+                        for answer in answers:
+                            # Убеждаемся, что ответ - это строка, содержащая только цифру
+                            if isinstance(answer, str) and answer.isdigit() and answer in answer_stats:
+                                answer_stats[answer] += 1
+                            elif isinstance(answer, int) or (isinstance(answer, str) and answer.isdigit()):
+                                # Преобразуем числовой ответ в строковый ключ
+                                answer_key = str(answer)
+                                if answer_key in answer_stats:
+                                    answer_stats[answer_key] += 1
+                                else:
+                                    logging.warning(f"Неизвестный тип ответа: {answer}")
+                            else:
+                                logging.warning(f"Неизвестный формат ответа: {answer}, тип: {type(answer)}")
+                        
+                        logging.info(f"Статистика ответов после пересчета: {answer_stats}")
+                        
+                        # Обновляем статистику в базе данных
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE test_results SET answer_stats = ? WHERE user_id = ?",
+                            (json.dumps(answer_stats), user_id)
+                        )
+                        conn.commit()
+                        conn.close()
+                    
+                    total_answers = sum(answer_stats.values())
+                    
+                    # Формируем статистику в нужном формате
+                    for answer_type in sorted(answer_stats.keys()):
+                        count = answer_stats[answer_type]
+                        percentage = (count / total_answers) * 100 if total_answers > 0 else 0
+                        stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
+                
+                # Создаем сообщение для администратора
+                admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+                
+                # Отправляем скриншот администратору
+                with open(file_path, "rb") as photo_file:
+                    await context.bot.send_photo(
+                        chat_id=admin_id,
+                        photo=photo_file,
+                        caption=admin_message,
+                        reply_markup=admin_keyboard
+                    )
+                
+                logging.info(f"Отправлено уведомление администратору {admin_id} о завершении теста пользователем {user_id}")
+            except Exception as e:
+                logging.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
+    
+    except Exception as e:
+        logging.error(f"Ошибка при обработке документа: {e}")
+        await update.message.reply_text(
+            "Произошла ошибка при обработке документа. Пожалуйста, попробуйте еще раз.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
 def main() -> None:
     """
-    Запускает Telegram-бота
+    Основная функция для запуска бота
     """
-
     try:
         logging.info("Запуск бота")
         
         # Проверяем, что запущен только один экземпляр бота
-        is_single_instance, lock_file = check_single_instance()
-        if not is_single_instance:
+        if not check_single_instance():
             logging.error("Бот уже запущен. Завершение работы.")
             return
+        
+        # Инициализируем базу данных
+        init_database()
+        
+        # Логируем переменные окружения
+        logging.info(f"ADMIN_ID: {ADMIN_ID}")
+        logging.info(f"ADMIN_IDS: {ADMIN_IDS}")
+        logging.info(f"BOT_USERNAME: {BOT_USERNAME}")
         
         # Создаем приложение с увеличенным таймаутом
         application = (
@@ -1058,6 +1774,9 @@ def main() -> None:
             .connect_timeout(30.0)  # Увеличиваем таймаут соединения до 30 секунд
             .read_timeout(30.0)     # Увеличиваем таймаут чтения до 30 секунд
             .write_timeout(30.0)    # Увеличиваем таймаут записи до 30 секунд
+            .get_updates_read_timeout(30.0)  # Устанавливаем таймаут для getUpdates
+            .get_updates_write_timeout(30.0) # Устанавливаем таймаут для getUpdates
+            .get_updates_connect_timeout(30.0) # Устанавливаем таймаут для getUpdates
             .build()
         )
 
@@ -1065,10 +1784,18 @@ def main() -> None:
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler("start", start)],
             states={
-                WAITING_FOR_INITIAL_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_benefits_choice)],
-                WAITING_FOR_BENEFITS_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_benefits_choice)],
-                WAITING_FOR_TEST_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_test)],
-                ANSWERING_QUESTIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_answer)],
+                CHOOSING_LANGUAGE: [
+                    CallbackQueryHandler(handle_language_callback, pattern=r"^lang_")
+                ],
+                WAITING_FOR_TEST_CHOICE: [
+                    CallbackQueryHandler(handle_choice_callback, pattern=r"^start_test$"),
+                    CallbackQueryHandler(handle_choice_callback, pattern=r"^choice_no$")
+                ],
+                ANSWERING_QUESTIONS: [
+                    CallbackQueryHandler(handle_answer_callback, pattern=r"^answer_"),
+                    CallbackQueryHandler(handle_answer_callback, pattern=r"^back_to_previous$"),
+                    CallbackQueryHandler(handle_answer_callback, pattern=r"^finish_test$")
+                ],
                 WAITING_FOR_SECOND_TEST: [MessageHandler((filters.PHOTO | filters.Document.IMAGE) | filters.TEXT & ~filters.COMMAND, handle_second_test_results)],
                 WAITING_FOR_ADMIN_RESPONSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_response)]
             },
@@ -1086,8 +1813,24 @@ def main() -> None:
             handle_admin_decision
         ))
         
-        # Добавляем обработчик для инлайн-кнопок
-        application.add_handler(CallbackQueryHandler(handle_admin_callback))
+        # Добавляем обработчик для инлайн-кнопок администратора
+        application.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^(accept|reject)_\d+$"))
+        
+        # Добавляем обработчик для инлайн-кнопок выбора языка
+        application.add_handler(CallbackQueryHandler(handle_language_callback, pattern=r"^lang_"))
+        
+        # Добавляем обработчик для инлайн-кнопок выбора "пройти тест" или "нет, спасибо"
+        application.add_handler(CallbackQueryHandler(handle_choice_callback, pattern=r"^choice_"))
+        
+        # Добавляем обработчик для инлайн-кнопки "start_test"
+        application.add_handler(CallbackQueryHandler(handle_choice_callback, pattern=r"^start_test$"))
+        
+        # Добавляем обработчик для инлайн-кнопок ответов на вопросы теста
+        application.add_handler(CallbackQueryHandler(handle_answer_callback, pattern=r"^answer_"))
+        
+        # Добавляем обработчик для инлайн-кнопок "back_to_previous" и "finish_test"
+        application.add_handler(CallbackQueryHandler(handle_answer_callback, pattern=r"^back_to_previous$"))
+        application.add_handler(CallbackQueryHandler(handle_answer_callback, pattern=r"^finish_test$"))
 
         # Добавляем обработчик ошибок с более информативными сообщениями
         async def error_handler(update: object, context: CallbackContext) -> None:
@@ -1095,37 +1838,27 @@ def main() -> None:
             logging.error(f"Произошла ошибка: {error_message}")
             
             user_message = "Извините, произошла ошибка. "
-            if "Timed out" in error_message:
-                user_message += "Превышено время ожидания ответа. Пожалуйста, повторите попытку."
-            elif "NetworkError" in error_message:
-                user_message += "Проблема с сетевым подключением. Пожалуйста, проверьте ваше соединение."
-            elif "Conflict: terminated by other getUpdates request" in error_message:
-                user_message += "Бот уже запущен в другом месте. Пожалуйста, используйте только один экземпляр бота."
-                logging.warning("Обнаружен конфликт с другим экземпляром бота. Завершение работы.")
-                return  # Прекращаем обработку ошибки, так как она будет повторяться
+            
+            if "Conflict" in error_message:
+                user_message += "Бот уже запущен в другом месте. Пожалуйста, подождите немного и попробуйте снова."
             else:
-                user_message += "Пожалуйста, попробуйте позже или начните сначала с помощью /start"
+                user_message += "Пожалуйста, попробуйте еще раз позже или обратитесь к администратору."
             
             if update and isinstance(update, Update) and update.effective_message:
-                try:
-                    await update.effective_message.reply_text(user_message)
-                except Exception as e:
-                    logging.error(f"Не удалось отправить сообщение об ошибке: {e}")
-
-        application.add_error_handler(error_handler)
-
-        # Запускаем бота с настройками повторных попыток
-        application.run_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,  # Игнорируем обновления, накопившиеся во время простоя
-            pool_timeout=30.0,          # Увеличиваем таймаут пула
-            read_timeout=30.0,          # Увеличиваем таймаут чтения
-            write_timeout=30.0          # Увеличиваем таймаут записи
-        )
+                await update.effective_message.reply_text(user_message)
         
+        application.add_error_handler(error_handler)
+        
+        # Добавляем обработчик для фотографий и документов
+        application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        application.add_handler(MessageHandler(filters.Document.IMAGE, handle_document))
+        
+        # Запускаем бота
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+        logging.info("Бот запущен")
     except Exception as e:
-        logging.error(f"Ошибка при запуске бота: {str(e)}")
-        raise
+        logging.error(f"Ошибка при запуске бота: {e}")
 
 if __name__ == "__main__":
     lock_file = None
@@ -1140,8 +1873,9 @@ if __name__ == "__main__":
         # Если файл блокировки был создан, закрываем его
         if 'lock_file' in locals() and lock_file:
             try:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
                 lock_file.close()
-                if os.path.exists(LOCK_FILE):
-                    os.remove(LOCK_FILE)
+                os.unlink(LOCK_FILE)
+                logging.info(f"Файл блокировки {LOCK_FILE} удален")
             except Exception as e:
-                logging.error(f"Ошибка при освобождении файла блокировки: {e}")
+                logging.error(f"Ошибка при удалении файла блокировки: {e}")
