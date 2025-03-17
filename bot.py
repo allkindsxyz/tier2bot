@@ -122,6 +122,10 @@ def init_database():
             CREATE TABLE IF NOT EXISTS test_results (
                 user_id INTEGER PRIMARY KEY,
                 dominant_type TEXT,
+                username TEXT,
+                first_name TEXT,
+                answers TEXT,
+                answer_stats TEXT,
                 timestamp INTEGER
             )
         ''')
@@ -132,6 +136,23 @@ def init_database():
         if 'dominant_type' not in columns:
             logging.info("Добавляем столбец dominant_type в таблицу test_results")
             cursor.execute("ALTER TABLE test_results ADD COLUMN dominant_type TEXT")
+        
+        # Проверяем наличие остальных столбцов в таблице test_results
+        if 'username' not in columns:
+            logging.info("Добавляем столбец username в таблицу test_results")
+            cursor.execute("ALTER TABLE test_results ADD COLUMN username TEXT")
+        
+        if 'first_name' not in columns:
+            logging.info("Добавляем столбец first_name в таблицу test_results")
+            cursor.execute("ALTER TABLE test_results ADD COLUMN first_name TEXT")
+        
+        if 'answers' not in columns:
+            logging.info("Добавляем столбец answers в таблицу test_results")
+            cursor.execute("ALTER TABLE test_results ADD COLUMN answers TEXT")
+        
+        if 'answer_stats' not in columns:
+            logging.info("Добавляем столбец answer_stats в таблицу test_results")
+            cursor.execute("ALTER TABLE test_results ADD COLUMN answer_stats TEXT")
         
         # Создаем таблицу для полных результатов тестов
         cursor.execute('''
