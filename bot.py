@@ -327,7 +327,7 @@ def load_user_progress(user_id: int) -> Dict[str, Any]:
                 return all_progress.get(str(user_id), {})
         return {}
     except Exception as e:
-        logging.error(f"Ошибка при загрузке прогресса пользователя из файла: {e}")
+        logging.error(f"Ошибка при загрузке прогресса пользователя: {e}")
         return {}
 
 def clear_user_progress(user_id: int) -> None:
@@ -482,6 +482,7 @@ async def start_test(update: Update, context: CallbackContext) -> int:
             parse_mode=ParseMode.MARKDOWN_V2
         )
         return ConversationHandler.END
+
 async def start_new_test(update: Update, context: CallbackContext) -> str:
     """
     Начинает новый тест
@@ -1113,372 +1114,101 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
         except Exception as e:
             logging.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
         
-        # Отправляем сообщение администраторам
-        logging.info(f"Отправляем сообщение администраторам: {ADMIN_IDS}")
-        for admin_id in ADMIN_IDS:
-            try:
-                logging.info(f"Отправляем сообщение администратору {admin_id}")
-                
-                # Создаем простое сообщение для администратора
-                admin_message = f"Пользователь {username} (@{username}) с ID {user_id} завершил тестирование."
-                
-                # Отправляем текстовое сообщение администратору
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=admin_message
-                )
-                
-                # Отправляем скриншот администратору отдельным сообщением
-                if os.path.exists(file_path):
-                    with open(file_path, "rb") as photo_file:
-                        await context.bot.send_photo(
-                            chat_id=admin_id,
-                            photo=photo_file,
-                            caption=f"Скриншот от пользователя {username} (ID: {user_id})"
-                        )
-                
-                logging.info(f"Отправлено уведомление администратору {admin_id} о завершении теста пользователем {user_id}")
-            except Exception as e:
-                logging.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
-        
-        return ConversationHandler.END
-    else:
-        # Если пользователь отправил текст, а не фото
-        logging.info(f"Пользователь {user_id} отправил текст вместо фото")
-        await update.message.reply_text(
-            escape_markdown_v2(get_text("send_screenshot", language)),
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        return WAITING_FOR_SECOND_TEST
-
-def create_backup():
-    """
-    Создает резервную копию базы данных
-    """
-
-    try:
-        logging.info("Создание резервной копии базы данных")
-    except Exception as e:
-        logging.error(f"Ошибка при создании резервной копии: {str(e)}")
-
-def schedule_backup():
-    """
-    Планирует регулярное создание бэкапов
-    """
-
-    try:
-        logging.info("Планирование резервного копирования")
-    except Exception as e:
-        logging.error(f"Ошибка при планировании резервного копирования: {str(e)}")
-
-async def handle_admin_callback(update: Update, context: CallbackContext) -> None:
-    """
-    Обрабатывает нажатия на инлайн-кнопки администратора
-    """
-    query = update.callback_query
-    await query.answer()
-    
-    if query.from_user.id != ADMIN_ID:
-        await query.message.reply_text("У вас нет прав для выполнения этой команды.")
-        return
-    
-    try:
-        # Получаем данные из callback_data
-        data = query.data
-        action, user_id = data.split("_")
-        user_id = int(user_id)
-        
-        # Получаем язык пользователя
-        language = get_user_language(user_id)
-        
-        if action == "accept":
-            status = "Принят"
-            # Используем локализованное сообщение
-            message = get_text("accepted_message", language).format(
-                calendly_link=escape_markdown_v2(CALENDLY_LINK)
-            )
-        elif action == "reject":
-            status = "Отклонен"
-            # Используем локализованное сообщение
-            message = get_text("rejected_message", language)
-        else:
-            return
-        
-        # Отправляем сообщение пользователю
+        # Отправляем сообщение администратору
         try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=message,
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
+            # Создаем инлайн-клавиатуру для принятия/отклонения
+            keyboard = [
+                [
+                    InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
+                    InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
+                ]
+            ]
+            admin_keyboard = InlineKeyboardMarkup(keyboard)
             
-            # Обновляем сообщение администратора, чтобы показать, что решение принято
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text(
-                get_text(f"user_{action}ed", language).format(user_id=user_id)
-            )
-        except Exception as e:
-            if "bot can't initiate conversation with a user" in str(e):
-                await query.message.reply_text(
-                    escape_markdown_v2(get_text("error_sending_to_admin", language).format(bot_username=BOT_USERNAME)),
-                    parse_mode=ParseMode.MARKDOWN_V2
+            # Получаем статистику ответов пользователя
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT answers, answer_stats FROM test_results WHERE user_id = ?", (user_id,))
+            result = cursor.fetchone()
+            conn.close()
+            
+            stats_text = ""
+            if result:
+                answer_stats = json.loads(result[1])
+                
+                # Проверяем, что все ответы учтены в статистике
+                answers = json.loads(result[0])
+                logging.info(f"Ответы пользователя {user_id}: {answers}")
+                logging.info(f"Статистика ответов до проверки: {answer_stats}")
+                
+                # Убеждаемся, что каждый ответ учтен в статистике
+                for answer in answers:
+                    if answer not in answer_stats:
+                        answer_stats[answer] = 0
+                    
+                # Проверяем, что сумма значений в статистике равна количеству ответов
+                total_answers = sum(answer_stats.values())
+                if total_answers != len(answers):
+                    logging.warning(f"Количество ответов в статистике ({total_answers}) не соответствует количеству ответов пользователя ({len(answers)})")
+                    
+                    # Пересчитываем статистику на основе ответов
+                    answer_stats = {"1": 0, "2": 0, "3": 0, "4": 0}
+                    for answer in answers:
+                        # Убеждаемся, что ответ - это строка, содержащая только цифру
+                        if isinstance(answer, str) and answer.isdigit() and answer in answer_stats:
+                            answer_stats[answer] += 1
+                        elif isinstance(answer, int) or (isinstance(answer, str) and answer.isdigit()):
+                            # Преобразуем числовой ответ в строковый ключ
+                            answer_key = str(answer)
+                            if answer_key in answer_stats:
+                                answer_stats[answer_key] += 1
+                            else:
+                                logging.warning(f"Неизвестный тип ответа: {answer}")
+                        else:
+                            logging.warning(f"Неизвестный формат ответа: {answer}, тип: {type(answer)}")
+                    
+                    logging.info(f"Статистика ответов после пересчета: {answer_stats}")
+                    
+                    # Обновляем статистику в базе данных
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE test_results SET answer_stats = ? WHERE user_id = ?",
+                        (json.dumps(answer_stats), user_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                
+                total_answers = sum(answer_stats.values())
+                
+                # Формируем статистику в нужном формате
+                for answer_type in sorted(answer_stats.keys()):
+                    count = answer_stats[answer_type]
+                    percentage = (count / total_answers) * 100 if total_answers > 0 else 0
+                    stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
+            
+            # Создаем сообщение для администратора
+            admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            
+            # Отправляем скриншот администратору
+            with open(file_path, "rb") as photo_file:
+                await context.bot.send_photo(
+                    chat_id=ADMIN_ID,
+                    photo=photo_file,
+                    caption=admin_message,
+                    reply_markup=admin_keyboard
                 )
-            else:
-                await query.message.reply_text(f"❌ Ошибка при отправке ответа: {str(e)}")
+            
+            logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке уведомления администратору: {e}")
+    
     except Exception as e:
-        logging.error(f"Ошибка при обработке callback: {str(e)}")
-        await query.message.reply_text(f"Произошла ошибка: {str(e)}")
-
-async def handle_language_callback(update: Update, context: CallbackContext) -> int:
-    """
-    Обрабатывает выбор языка через инлайн-кнопки
-    """
-    query = update.callback_query
-    await query.answer()  # Отвечаем на запрос, чтобы убрать часы загрузки
-    
-    user_id = query.from_user.id
-    callback_data = query.data
-    
-    # Проверяем, что это callback для выбора языка
-    if not callback_data.startswith("lang_"):
-        return
-    
-    logging.info(f"Получен выбор языка от пользователя {user_id}: {callback_data}")
-    
-    if callback_data == "lang_ru":
-        language = "ru"
-        logging.info(f"Выбран русский язык")
-    elif callback_data == "lang_en":
-        language = "en"
-        logging.info(f"Выбран английский язык")
-    else:
-        # По умолчанию используем русский
-        language = "ru"
-        logging.info(f"Язык не распознан, используем русский по умолчанию")
-    
-    try:
-        # Сохраняем выбранный язык
-        save_user_language(user_id, language)
-        logging.info(f"Сохранен язык пользователя {user_id}: {language}")
-        
-        # Отправляем сообщение о выбранном языке
-        await query.edit_message_text(
-            get_text("language_selected", language)
-        )
-        logging.info(f"Отправлено сообщение о выбранном языке")
-        
-        # Отправляем приветственное сообщение
-        welcome_message = get_text("welcome", language)
-        logging.info(f"Подготовлено приветственное сообщение")
-        
-        # Отправляем приветственное сообщение
-        await query.message.reply_text(
-            f"{welcome_message}",
+        logging.error(f"Ошибка при обработке фотографии: {e}")
+        await update.message.reply_text(
+            "Произошла ошибка при обработке фотографии. Пожалуйста, попробуйте еще раз.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
-        
-        # Создаем инлайн-клавиатуру с кнопкой для начала теста
-        keyboard = [
-            [InlineKeyboardButton(get_text("take_test", language), callback_data="start_test")],
-            [InlineKeyboardButton(get_text("no_thanks", language), callback_data="choice_no")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        logging.info(f"Создана инлайн-клавиатура с кнопкой для начала теста")
-        
-        # Отправляем сообщение с кнопкой для начала теста
-        await query.message.reply_text(
-            get_text("start_question", language),
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        logging.info(f"Отправлено сообщение с кнопкой для начала теста")
-        
-        return WAITING_FOR_TEST_CHOICE
-    except Exception as e:
-        logging.error(f"Ошибка при обработке выбора языка: {e}")
-        # В случае ошибки отправляем сообщение об ошибке
-        await query.message.reply_text(
-            f"Произошла ошибка при обработке выбора языка: {e}. Пожалуйста, попробуйте еще раз с помощью /start"
-        )
-        return ConversationHandler.END
-
-async def handle_choice_callback(update: Update, context: CallbackContext) -> int:
-    """
-    Обрабатывает выбор пользователя через инлайн-кнопки
-    """
-    query = update.callback_query
-    await query.answer()  # Отвечаем на запрос, чтобы убрать часы загрузки
-    
-    user_id = query.from_user.id
-    callback_data = query.data
-    language = get_user_language(user_id)
-    
-    logging.info(f"Получен выбор от пользователя {user_id}: {callback_data}")
-    
-    if callback_data == "choice_yes":
-        # Пользователь выбрал "Да, хочу узнать больше"
-        logging.info(f"Пользователь выбрал 'Да, хочу узнать больше'")
-        
-        # Создаем инлайн-клавиатуру с кнопками "Начать первый тест" и "Отказаться"
-        keyboard = [
-            [InlineKeyboardButton(get_text("take_test", language), callback_data="start_test")],
-            [InlineKeyboardButton(get_text("no_thanks", language), callback_data="choice_no")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Удаляем предыдущее сообщение с кнопками
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception as e:
-            logging.warning(f"Не удалось удалить кнопки: {e}")
-        
-        await query.message.reply_text(
-            get_text("start_question", language),
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        logging.info(f"Отправлено сообщение о необходимости пройти два теста")
-        
-        return WAITING_FOR_TEST_CHOICE
-    
-    elif callback_data == "start_test":
-        # Пользователь выбрал "Пройти тест"
-        logging.info(f"Пользователь выбрал 'Пройти тест'")
-        
-        # Удаляем предыдущее сообщение с кнопками
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception as e:
-            logging.warning(f"Не удалось удалить кнопки: {e}")
-        
-        return await start_test_inline(update, context)
-    
-    elif callback_data == "choice_no":
-        # Если пользователь отказался, благодарим за интерес
-        thanks_message = escape_markdown_v2(get_text("thanks_for_interest", language))
-        
-        # Удаляем предыдущее сообщение с кнопками
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception as e:
-            logging.warning(f"Не удалось удалить кнопки: {e}")
-        
-        await query.message.reply_text(
-            thanks_message,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        return ConversationHandler.END
-    
-    return WAITING_FOR_TEST_CHOICE
-
-async def start_test_inline(update: Update, context: CallbackContext) -> int:
-    """
-    Начинает тест после нажатия на инлайн-кнопку
-    """
-    query = update.callback_query
-    user_id = query.from_user.id
-    language = get_user_language(user_id)
-    
-    # Очищаем прогресс пользователя перед началом теста
-    clear_user_progress(user_id)
-    
-    # Загружаем первый вопрос
-    current_question = 0
-    questions = get_questions_by_language(language)
-    question = questions[current_question]
-    
-    # Форматируем вопрос и получаем маппинг ответов
-    formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(question, current_question, user_id=user_id)
-    
-    # Создаем инлайн-клавиатуру с вариантами ответов по 2 в ряд
-    keyboard = []
-    for i in range(0, len(keyboard_letters), 2):
-        row = []
-        for j in range(i, min(i+2, len(keyboard_letters))):
-            letter = keyboard_letters[j]
-            row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
-        keyboard.append(row)
-    
-    # Для первого вопроса не добавляем кнопку "Назад"
-    
-    # Сохраняем начальное состояние с маппингом
-    save_user_progress(user_id, {
-        "current_question": 0,
-        "answers": [],
-        "answer_stats": {"1": 0, "2": 0, "3": 0, "4": 0},
-        "current_mapping": letter_to_number,
-        "shuffled_options": shuffled_options,
-        "question_options": {"0": shuffled_options}  # Сохраняем порядок вариантов для первого вопроса
-    })
-    
-    # Отправляем первый вопрос
-    await query.message.reply_text(
-        formatted_text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return ANSWERING_QUESTIONS
-
-async def finish_test_inline(update: Update, context: CallbackContext) -> int:
-    """
-    Завершает тест и показывает результаты после инлайн-кнопок
-    """
-    query = update.callback_query
-    user_id = query.from_user.id
-    language = get_user_language(user_id)
-    
-    # Получаем прогресс пользователя
-    progress = load_user_progress(user_id)
-    
-    if not progress:
-        logging.error(f"Не найден прогресс для пользователя {user_id}")
-        await query.message.reply_text(
-            "Произошла ошибка при обработке результатов теста. Пожалуйста, начните тест заново с помощью /start",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        return ConversationHandler.END
-    
-    # Получаем статистику ответов
-    answer_stats = progress["answer_stats"]
-    
-    # Получаем вопросы для языка пользователя
-    language = get_user_language(user_id)
-    questions = get_questions_by_language(language)
-    
-    # Проверяем, что количество ответов соответствует количеству вопросов
-    answers = progress["answers"]
-    if len(answers) < len(questions):
-        logging.warning(f"Количество ответов ({len(answers)}) меньше количества вопросов ({len(questions)})")
-        logging.info(f"Ответы пользователя: {answers}")
-    
-    # Определяем преобладающий тип ответов
-    max_count = 0
-    dominant_type = None
-    
-    for answer_type, count in answer_stats.items():
-        if count > max_count:
-            max_count = count
-            dominant_type = answer_type
-    
-    # Отправляем сообщение о втором этапе с инструкциями
-    first_test_completed_message = get_text("first_test_completed", language)
-    
-    await query.message.reply_text(
-        first_test_completed_message,
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
-    
-    # Сохраняем результат теста
-    save_test_result(user_id, dominant_type)
-    
-    # Получаем информацию о пользователе
-    username = query.from_user.username or ""
-    first_name = query.from_user.first_name or ""
-    
-    # Сохраняем результаты теста в базу данных
-    save_test_results(user_id, username, first_name, progress["answers"], answer_stats)
-    
-    return WAITING_FOR_SECOND_TEST
 
 async def handle_photo(update: Update, context: CallbackContext) -> None:
     """
@@ -1521,101 +1251,102 @@ async def handle_photo(update: Update, context: CallbackContext) -> None:
         logging.info(f"Отправлено сообщение пользователю {user_id}")
         
         # Отправляем сообщение администратору
-        for admin_id in ADMIN_IDS:
-            try:
-                # Создаем инлайн-клавиатуру для принятия/отклонения
-                keyboard = [
-                    [
-                        InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
-                        InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
-                    ]
+        try:
+            # Создаем инлайн-клавиатуру для принятия/отклонения
+            keyboard = [
+                [
+                    InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
+                    InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
                 ]
-                admin_keyboard = InlineKeyboardMarkup(keyboard)
+            ]
+            admin_keyboard = InlineKeyboardMarkup(keyboard)
+            
+            # Получаем статистику ответов пользователя
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT answers, answer_stats FROM test_results WHERE user_id = ?", (user_id,))
+            result = cursor.fetchone()
+            conn.close()
+            
+            stats_text = ""
+            if result:
+                answer_stats = json.loads(result[1])
                 
-                # Получаем статистику ответов пользователя
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT answers, answer_stats FROM test_results WHERE user_id = ?", (user_id,))
-                result = cursor.fetchone()
-                conn.close()
+                # Проверяем, что все ответы учтены в статистике
+                answers = json.loads(result[0])
+                logging.info(f"Ответы пользователя {user_id}: {answers}")
+                logging.info(f"Статистика ответов до проверки: {answer_stats}")
                 
-                stats_text = ""
-                if result:
-                    answer_stats = json.loads(result[1])
+                # Убеждаемся, что каждый ответ учтен в статистике
+                for answer in answers:
+                    if answer not in answer_stats:
+                        answer_stats[answer] = 0
                     
-                    # Проверяем, что все ответы учтены в статистике
-                    answers = json.loads(result[0])
-                    logging.info(f"Ответы пользователя {user_id}: {answers}")
-                    logging.info(f"Статистика ответов до проверки: {answer_stats}")
+                # Проверяем, что сумма значений в статистике равна количеству ответов
+                total_answers = sum(answer_stats.values())
+                if total_answers != len(answers):
+                    logging.warning(f"Количество ответов в статистике ({total_answers}) не соответствует количеству ответов пользователя ({len(answers)})")
                     
-                    # Убеждаемся, что каждый ответ учтен в статистике
+                    # Пересчитываем статистику на основе ответов
+                    answer_stats = {"1": 0, "2": 0, "3": 0, "4": 0}
                     for answer in answers:
-                        if answer not in answer_stats:
-                            answer_stats[answer] = 0
-                        
-                    # Проверяем, что сумма значений в статистике равна количеству ответов
-                    total_answers = sum(answer_stats.values())
-                    if total_answers != len(answers):
-                        logging.warning(f"Количество ответов в статистике ({total_answers}) не соответствует количеству ответов пользователя ({len(answers)})")
-                        
-                        # Пересчитываем статистику на основе ответов
-                        answer_stats = {"1": 0, "2": 0, "3": 0, "4": 0}
-                        for answer in answers:
-                            # Убеждаемся, что ответ - это строка, содержащая только цифру
-                            if isinstance(answer, str) and answer.isdigit() and answer in answer_stats:
-                                answer_stats[answer] += 1
-                            elif isinstance(answer, int) or (isinstance(answer, str) and answer.isdigit()):
-                                # Преобразуем числовой ответ в строковый ключ
-                                answer_key = str(answer)
-                                if answer_key in answer_stats:
-                                    answer_stats[answer_key] += 1
-                                else:
-                                    logging.warning(f"Неизвестный тип ответа: {answer}")
+                        # Убеждаемся, что ответ - это строка, содержащая только цифру
+                        if isinstance(answer, str) and answer.isdigit() and answer in answer_stats:
+                            answer_stats[answer] += 1
+                        elif isinstance(answer, int) or (isinstance(answer, str) and answer.isdigit()):
+                            # Преобразуем числовой ответ в строковый ключ
+                            answer_key = str(answer)
+                            if answer_key in answer_stats:
+                                answer_stats[answer_key] += 1
                             else:
-                                logging.warning(f"Неизвестный формат ответа: {answer}, тип: {type(answer)}")
-                        
-                        logging.info(f"Статистика ответов после пересчета: {answer_stats}")
-                        
-                        # Обновляем статистику в базе данных
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE test_results SET answer_stats = ? WHERE user_id = ?",
-                            (json.dumps(answer_stats), user_id)
-                        )
-                        conn.commit()
-                        conn.close()
+                                logging.warning(f"Неизвестный тип ответа: {answer}")
+                        else:
+                            logging.warning(f"Неизвестный формат ответа: {answer}, тип: {type(answer)}")
                     
-                    total_answers = sum(answer_stats.values())
+                    logging.info(f"Статистика ответов после пересчета: {answer_stats}")
                     
-                    # Формируем статистику в нужном формате
-                    for answer_type in sorted(answer_stats.keys()):
-                        count = answer_stats[answer_type]
-                        percentage = (count / total_answers) * 100 if total_answers > 0 else 0
-                        stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
-                
-                # Создаем сообщение для администратора
-                admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
-                
-                # Отправляем скриншот администратору
-                with open(file_path, "rb") as photo_file:
-                    await context.bot.send_photo(
-                        chat_id=admin_id,
-                        photo=photo_file,
-                        caption=admin_message,
-                        reply_markup=admin_keyboard
+                    # Обновляем статистику в базе данных
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE test_results SET answer_stats = ? WHERE user_id = ?",
+                        (json.dumps(answer_stats), user_id)
                     )
+                    conn.commit()
+                    conn.close()
                 
-                logging.info(f"Отправлено уведомление администратору {admin_id} о завершении теста пользователем {user_id}")
-            except Exception as e:
-                logging.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
-    
+                total_answers = sum(answer_stats.values())
+                
+                # Формируем статистику в нужном формате
+                for answer_type in sorted(answer_stats.keys()):
+                    count = answer_stats[answer_type]
+                    percentage = (count / total_answers) * 100 if total_answers > 0 else 0
+                    stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
+            
+            # Создаем сообщение для администратора
+            admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            
+            # Отправляем скриншот администратору
+            with open(file_path, "rb") as photo_file:
+                await context.bot.send_photo(
+                    chat_id=ADMIN_ID,
+                    photo=photo_file,
+                    caption=admin_message,
+                    reply_markup=admin_keyboard
+                )
+            
+            logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке уведомления администратору: {e}")
+        
+        return ConversationHandler.END
     except Exception as e:
         logging.error(f"Ошибка при обработке фотографии: {e}")
         await update.message.reply_text(
             "Произошла ошибка при обработке фотографии. Пожалуйста, попробуйте еще раз.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
+        return WAITING_FOR_SECOND_TEST
 
 async def handle_document(update: Update, context: CallbackContext) -> None:
     """
@@ -1640,7 +1371,7 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
             escape_markdown_v2(get_text("not_image", language)),
             parse_mode=ParseMode.MARKDOWN_V2
         )
-        return
+        return WAITING_FOR_SECOND_TEST
     
     # Создаем директорию для скриншотов, если она не существует
     os.makedirs("data/screenshots", exist_ok=True)
@@ -1667,101 +1398,102 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
         logging.info(f"Отправлено сообщение пользователю {user_id}")
         
         # Отправляем сообщение администратору
-        for admin_id in ADMIN_IDS:
-            try:
-                # Создаем инлайн-клавиатуру для принятия/отклонения
-                keyboard = [
-                    [
-                        InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
-                        InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
-                    ]
+        try:
+            # Создаем инлайн-клавиатуру для принятия/отклонения
+            keyboard = [
+                [
+                    InlineKeyboardButton("Принять", callback_data=f"accept_{user_id}"),
+                    InlineKeyboardButton("Отклонить", callback_data=f"reject_{user_id}")
                 ]
-                admin_keyboard = InlineKeyboardMarkup(keyboard)
+            ]
+            admin_keyboard = InlineKeyboardMarkup(keyboard)
+            
+            # Получаем статистику ответов пользователя
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT answers, answer_stats FROM test_results WHERE user_id = ?", (user_id,))
+            result = cursor.fetchone()
+            conn.close()
+            
+            stats_text = ""
+            if result:
+                answer_stats = json.loads(result[1])
                 
-                # Получаем статистику ответов пользователя
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT answers, answer_stats FROM test_results WHERE user_id = ?", (user_id,))
-                result = cursor.fetchone()
-                conn.close()
+                # Проверяем, что все ответы учтены в статистике
+                answers = json.loads(result[0])
+                logging.info(f"Ответы пользователя {user_id}: {answers}")
+                logging.info(f"Статистика ответов до проверки: {answer_stats}")
                 
-                stats_text = ""
-                if result:
-                    answer_stats = json.loads(result[1])
+                # Убеждаемся, что каждый ответ учтен в статистике
+                for answer in answers:
+                    if answer not in answer_stats:
+                        answer_stats[answer] = 0
                     
-                    # Проверяем, что все ответы учтены в статистике
-                    answers = json.loads(result[0])
-                    logging.info(f"Ответы пользователя {user_id}: {answers}")
-                    logging.info(f"Статистика ответов до проверки: {answer_stats}")
+                # Проверяем, что сумма значений в статистике равна количеству ответов
+                total_answers = sum(answer_stats.values())
+                if total_answers != len(answers):
+                    logging.warning(f"Количество ответов в статистике ({total_answers}) не соответствует количеству ответов пользователя ({len(answers)})")
                     
-                    # Убеждаемся, что каждый ответ учтен в статистике
+                    # Пересчитываем статистику на основе ответов
+                    answer_stats = {"1": 0, "2": 0, "3": 0, "4": 0}
                     for answer in answers:
-                        if answer not in answer_stats:
-                            answer_stats[answer] = 0
-                        
-                    # Проверяем, что сумма значений в статистике равна количеству ответов
-                    total_answers = sum(answer_stats.values())
-                    if total_answers != len(answers):
-                        logging.warning(f"Количество ответов в статистике ({total_answers}) не соответствует количеству ответов пользователя ({len(answers)})")
-                        
-                        # Пересчитываем статистику на основе ответов
-                        answer_stats = {"1": 0, "2": 0, "3": 0, "4": 0}
-                        for answer in answers:
-                            # Убеждаемся, что ответ - это строка, содержащая только цифру
-                            if isinstance(answer, str) and answer.isdigit() and answer in answer_stats:
-                                answer_stats[answer] += 1
-                            elif isinstance(answer, int) or (isinstance(answer, str) and answer.isdigit()):
-                                # Преобразуем числовой ответ в строковый ключ
-                                answer_key = str(answer)
-                                if answer_key in answer_stats:
-                                    answer_stats[answer_key] += 1
-                                else:
-                                    logging.warning(f"Неизвестный тип ответа: {answer}")
+                        # Убеждаемся, что ответ - это строка, содержащая только цифру
+                        if isinstance(answer, str) and answer.isdigit() and answer in answer_stats:
+                            answer_stats[answer] += 1
+                        elif isinstance(answer, int) or (isinstance(answer, str) and answer.isdigit()):
+                            # Преобразуем числовой ответ в строковый ключ
+                            answer_key = str(answer)
+                            if answer_key in answer_stats:
+                                answer_stats[answer_key] += 1
                             else:
-                                logging.warning(f"Неизвестный формат ответа: {answer}, тип: {type(answer)}")
-                        
-                        logging.info(f"Статистика ответов после пересчета: {answer_stats}")
-                        
-                        # Обновляем статистику в базе данных
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute(
-                            "UPDATE test_results SET answer_stats = ? WHERE user_id = ?",
-                            (json.dumps(answer_stats), user_id)
-                        )
-                        conn.commit()
-                        conn.close()
+                                logging.warning(f"Неизвестный тип ответа: {answer}")
+                        else:
+                            logging.warning(f"Неизвестный формат ответа: {answer}, тип: {type(answer)}")
                     
-                    total_answers = sum(answer_stats.values())
+                    logging.info(f"Статистика ответов после пересчета: {answer_stats}")
                     
-                    # Формируем статистику в нужном формате
-                    for answer_type in sorted(answer_stats.keys()):
-                        count = answer_stats[answer_type]
-                        percentage = (count / total_answers) * 100 if total_answers > 0 else 0
-                        stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
-                
-                # Создаем сообщение для администратора
-                admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
-                
-                # Отправляем скриншот администратору
-                with open(file_path, "rb") as photo_file:
-                    await context.bot.send_photo(
-                        chat_id=admin_id,
-                        photo=photo_file,
-                        caption=admin_message,
-                        reply_markup=admin_keyboard
+                    # Обновляем статистику в базе данных
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE test_results SET answer_stats = ? WHERE user_id = ?",
+                        (json.dumps(answer_stats), user_id)
                     )
+                    conn.commit()
+                    conn.close()
                 
-                logging.info(f"Отправлено уведомление администратору {admin_id} о завершении теста пользователем {user_id}")
-            except Exception as e:
-                logging.error(f"Ошибка при отправке уведомления администратору {admin_id}: {e}")
-    
+                total_answers = sum(answer_stats.values())
+                
+                # Формируем статистику в нужном формате
+                for answer_type in sorted(answer_stats.keys()):
+                    count = answer_stats[answer_type]
+                    percentage = (count / total_answers) * 100 if total_answers > 0 else 0
+                    stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
+            
+            # Создаем сообщение для администратора
+            admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            
+            # Отправляем скриншот администратору
+            with open(file_path, "rb") as photo_file:
+                await context.bot.send_photo(
+                    chat_id=ADMIN_ID,
+                    photo=photo_file,
+                    caption=admin_message,
+                    reply_markup=admin_keyboard
+                )
+            
+            logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+        except Exception as e:
+            logging.error(f"Ошибка при отправке уведомления администратору: {e}")
+        
+        return ConversationHandler.END
     except Exception as e:
         logging.error(f"Ошибка при обработке документа: {e}")
         await update.message.reply_text(
             "Произошла ошибка при обработке документа. Пожалуйста, попробуйте еще раз.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
+        return WAITING_FOR_SECOND_TEST
 
 def main() -> None:
     """
