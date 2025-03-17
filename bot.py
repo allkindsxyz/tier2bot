@@ -983,6 +983,7 @@ async def finish_test(update: Update, context: CallbackContext) -> int:
     """
     try:
         user_id = update.message.from_user.id
+        language = get_user_language(user_id)
         
         # Загружаем прогресс пользователя
         progress = load_user_progress(user_id)
@@ -996,14 +997,8 @@ async def finish_test(update: Update, context: CallbackContext) -> int:
             "answer_stats": answer_stats
         })
         
-        # Формируем сообщение с результатами для пользователя
-        results_message = (
-            "*Спасибо за прохождение первого теста\\!*\n\n"
-            "Для полной оценки вашего уровня, пожалуйста, пройдите второй тест по ссылке:\n"
-            "[Пройти второй тест](https://sdtest\\.me/ru)\n\n"
-            "После прохождения теста, пожалуйста, *сделайте скриншот результатов* "
-            "и отправьте его сюда\\."
-        )
+        # Используем локализованную строку для сообщения о втором тесте
+        results_message = get_text("first_test_completed", language)
         
         # Отправляем сообщение с результатами пользователю
         await update.message.reply_text(

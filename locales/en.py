@@ -42,7 +42,7 @@ The program is free, but we reserve the right to refuse if we believe you're not
     "answer_selected": "Selected answer: {letter}",
     
     # Completing the first test
-    "first_test_completed": "*Thank you for completing the first test\\!*\n\nFor a complete assessment of your level, please take the second test at the link:\n[Take the second test](https://sdtest\\.com)\n\n📸 *After completing the test, please take a screenshot of the results and send it here\\.*",
+    "first_test_completed": "*Thank you for completing the first test\\!*\n\nFor a complete assessment of your level, please take the second test at the link:\n[Take the second test](https://sdtest\\.me)\n\n📸 *After completing the test, please take a screenshot of the results and send it here\\.*",
     "processing_results": "You have answered all the questions! Summarizing the results...",
     "second_stage_message": "Now, please take the second test using the link above and send a screenshot with the results.",
     
