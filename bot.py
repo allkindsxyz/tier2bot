@@ -1499,6 +1499,234 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
         )
         return WAITING_FOR_SECOND_TEST
 
+async def handle_admin_callback(update: Update, context: CallbackContext) -> None:
+    """
+    Обрабатывает callback от администратора с решением принять или отклонить пользователя
+    """
+    query = update.callback_query
+    await query.answer()  # Отвечаем на запрос, чтобы убрать часы загрузки
+    
+    if query.from_user.id != ADMIN_ID:
+        logging.warning(f"Пользователь {query.from_user.id} попытался вызвать админскую функцию")
+        await query.message.reply_text("У вас нет прав доступа к этой функции.")
+        return
+    
+    callback_data = query.data
+    
+    # Проверяем, что это callback для принятия/отклонения (accept_123456789 или reject_123456789)
+    if not (callback_data.startswith("accept_") or callback_data.startswith("reject_")):
+        return
+    
+    # Извлекаем действие и user_id из callback_data
+    action, user_id_str = callback_data.split("_")
+    user_id = int(user_id_str)
+    
+    # Определяем сообщение в зависимости от действия
+    if action == "accept":
+        # Принимаем пользователя
+        message = (
+            "🎊 *Поздравляем\\! Вы приняты в программу Welcome to Tier 2\\!*\n\n"
+            "Для начала работы и согласования расписания, пожалуйста, запишитесь на вводную встречу:\n"
+            f"{escape_markdown_v2(CALENDLY_LINK)}"
+        )
+        user_message = f"✅ Пользователь {user_id} принят в программу"
+    else:
+        # Отклоняем пользователя
+        message = (
+            "*Спасибо за интерес к нашей программе\\!*\n\n"
+            "К сожалению, на данном этапе мы не можем предложить вам участие в программе\\.\n"
+            "Рекомендуем продолжить работу над собой и попробовать снова через некоторое время\\."
+        )
+        user_message = f"❌ Пользователю {user_id} отказано в участии"
+    
+    # Отправляем сообщение пользователю
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=message,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        
+        # Удаляем кнопки из сообщения администратора
+        await query.edit_message_reply_markup(reply_markup=None)
+        
+        # Подтверждаем администратору, что сообщение отправлено
+        await query.message.reply_text(
+            f"{user_message}\n\nСообщение успешно отправлено.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    except Exception as e:
+        if "bot can't initiate conversation with a user" in str(e):
+            # Пользователь не начал беседу с ботом
+            await query.message.reply_text(
+                f"❌ Не удалось отправить сообщение пользователю\\. Он еще не начал диалог с ботом\\.\n\n"
+                f"*Необходимые действия:*\n"
+                f"1\\. Попросите пользователя перейти в @{BOT_USERNAME}\n"
+                f"2\\. Нажать START или отправить команду /start\n"
+                f"3\\. После этого повторите отправку ответа",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+        else:
+            # Другая ошибка
+            await query.message.reply_text(
+                f"❌ Ошибка при отправке сообщения: {str(e)}",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+
+async def handle_language_callback(update: Update, context: CallbackContext) -> int:
+    """
+    Обрабатывает выбор языка через инлайн-кнопки
+    """
+    query = update.callback_query
+    await query.answer()  # Отвечаем на запрос, чтобы убрать часы загрузки
+    
+    user_id = query.from_user.id
+    callback_data = query.data
+    
+    # Проверяем, что это callback для выбора языка
+    if not callback_data.startswith("lang_"):
+        return
+    
+    logging.info(f"Получен выбор языка от пользователя {user_id}: {callback_data}")
+    
+    if callback_data == "lang_ru":
+        language = "ru"
+        logging.info(f"Выбран русский язык")
+    elif callback_data == "lang_en":
+        language = "en"
+        logging.info(f"Выбран английский язык")
+    else:
+        # По умолчанию используем русский
+        language = "ru"
+        logging.info(f"Язык не распознан, используем русский по умолчанию")
+    
+    try:
+        # Сохраняем выбранный язык
+        save_user_language(user_id, language)
+        logging.info(f"Сохранен язык пользователя {user_id}: {language}")
+        
+        # Отправляем сообщение о выбранном языке
+        await query.edit_message_text(
+            get_text("language_selected", language)
+        )
+        logging.info(f"Отправлено сообщение о выбранном языке")
+        
+        # Отправляем приветственное сообщение
+        welcome_message = get_text("welcome", language)
+        logging.info(f"Подготовлено приветственное сообщение")
+        
+        # Отправляем приветственное сообщение
+        await query.message.reply_text(
+            welcome_message,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        
+        # Создаем инлайн-клавиатуру с кнопкой для начала теста
+        keyboard = [
+            [InlineKeyboardButton(get_text("take_test", language), callback_data="start_test")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        logging.info(f"Создана инлайн-клавиатура с кнопкой для начала теста")
+        
+        # Отправляем сообщение о необходимости пройти тест
+        await query.message.reply_text(
+            get_text("test_intro", language),
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        logging.info(f"Отправлено сообщение о необходимости пройти тест")
+        
+        return WAITING_FOR_TEST_CHOICE
+    except Exception as e:
+        logging.error(f"Ошибка при обработке выбора языка: {e}")
+        # В случае ошибки отправляем сообщение об ошибке
+        await query.message.reply_text(
+            f"Произошла ошибка при обработке выбора языка: {e}. Пожалуйста, попробуйте еще раз с помощью /start"
+        )
+        return ConversationHandler.END
+
+async def handle_choice_callback(update: Update, context: CallbackContext) -> int:
+    """
+    Обрабатывает выбор пользователя через инлайн-кнопки
+    """
+    query = update.callback_query
+    await query.answer()  # Отвечаем на запрос, чтобы убрать часы загрузки
+    
+    user_id = query.from_user.id
+    callback_data = query.data
+    language = get_user_language(user_id)
+    
+    logging.info(f"Получен выбор от пользователя {user_id}: {callback_data}")
+    
+    if callback_data == "start_test":
+        # Пользователь выбрал "Пройти тест"
+        logging.info(f"Пользователь выбрал 'Пройти тест'")
+        
+        # Удаляем предыдущее сообщение с кнопками
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e:
+            logging.warning(f"Не удалось удалить кнопки: {e}")
+        
+        # Очищаем прогресс пользователя перед началом теста
+        clear_user_progress(user_id)
+        
+        # Загружаем первый вопрос
+        current_question = 0
+        questions = get_questions_by_language(language)
+        question = questions[current_question]
+        
+        # Форматируем вопрос и получаем маппинг ответов
+        formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(
+            question, 
+            current_question, 
+            user_id=user_id
+        )
+        
+        # Создаем инлайн-клавиатуру с вариантами ответов по 2 в ряд
+        keyboard = []
+        for i in range(0, len(keyboard_letters), 2):
+            row = []
+            for j in range(i, min(i+2, len(keyboard_letters))):
+                letter = keyboard_letters[j]
+                row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
+            keyboard.append(row)
+        
+        # Сохраняем начальное состояние с маппингом
+        save_user_progress(user_id, {
+            "current_question": 0,
+            "answers": [],
+            "answer_stats": {"1": 0, "2": 0, "3": 0, "4": 0},
+            "current_mapping": letter_to_number,
+            "shuffled_options": shuffled_options,
+            "question_options": {"0": shuffled_options}  # Сохраняем порядок вариантов для первого вопроса
+        })
+        
+        # Отправляем первый вопрос
+        await query.message.reply_text(
+            formatted_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        return ANSWERING_QUESTIONS
+    
+    elif callback_data == "choice_no":
+        # Если пользователь отказался, благодарим за интерес
+        thanks_message = get_text("thanks_for_interest", language)
+        
+        # Удаляем предыдущее сообщение с кнопками
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e:
+            logging.warning(f"Не удалось удалить кнопки: {e}")
+        
+        await query.message.reply_text(
+            thanks_message,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        return ConversationHandler.END
+
 def main() -> None:
     """
     Основная функция для запуска бота
