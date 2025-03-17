@@ -636,8 +636,6 @@ async def handle_answer_callback(update: Update, context: CallbackContext) -> in
             progress["question_options"] = {}
         
         saved_options = progress["question_options"].get(str(current_question))
-        
-        # Форматируем вопрос и получаем маппинг ответов
         formatted_text, letter_to_number, keyboard_letters, shuffled_options = format_question_with_options(
             question, 
             current_question,
