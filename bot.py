@@ -1612,7 +1612,7 @@ async def handle_language_callback(update: Update, context: CallbackContext) -> 
         logging.info(f"Отправлено сообщение о выбранном языке")
         
         # Отправляем приветственное сообщение
-        welcome_message = get_text("welcome", language)
+        welcome_message = escape_markdown_v2(get_text("welcome", language))
         logging.info(f"Подготовлено приветственное сообщение")
         
         # Отправляем приветственное сообщение
@@ -1630,7 +1630,7 @@ async def handle_language_callback(update: Update, context: CallbackContext) -> 
         
         # Отправляем сообщение о необходимости пройти тест
         await query.message.reply_text(
-            get_text("test_intro", language),
+            escape_markdown_v2(get_text("test_intro", language)),
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -1713,7 +1713,7 @@ async def handle_choice_callback(update: Update, context: CallbackContext) -> in
     
     elif callback_data == "choice_no":
         # Если пользователь отказался, благодарим за интерес
-        thanks_message = get_text("thanks_for_interest", language)
+        thanks_message = escape_markdown_v2(get_text("thanks_for_interest", language))
         
         # Удаляем предыдущее сообщение с кнопками
         try:
