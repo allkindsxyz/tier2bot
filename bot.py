@@ -566,6 +566,11 @@ async def handle_answer_callback(update: Update, context: CallbackContext) -> in
         # Получаем номер текущего вопроса
         current_question = progress["current_question"]
         
+        # Сохраняем ID сообщения с текущим вопросом для возможности возврата
+        if "previous_question_message_id" not in progress:
+            progress["previous_question_message_id"] = {}
+        progress["previous_question_message_id"][str(current_question)] = query.message.message_id
+        
         # Получаем маппинг букв на номера ответов
         letter_to_number = progress["current_mapping"]
         
@@ -716,7 +721,7 @@ async def go_to_previous_question_inline(update: Update, context: CallbackContex
         )
         return ANSWERING_QUESTIONS
     
-    # Пытаемся удалить сообщение с выбранным ответом
+    # Пытаемся удалить сообщение с выбранным ответом ("Выбран ответ X")
     if "last_answer_message_id" in progress:
         try:
             await context.bot.delete_message(
@@ -728,6 +733,23 @@ async def go_to_previous_question_inline(update: Update, context: CallbackContex
             del progress["last_answer_message_id"]
         except Exception as e:
             logging.warning(f"Не удалось удалить сообщение с выбранным ответом: {e}")
+    
+    # Пытаемся удалить или скрыть текущий вопрос
+    try:
+        # Удаляем сообщение с текущим вопросом
+        await query.message.delete()
+        logging.info(f"Удален текущий вопрос при возврате к предыдущему")
+    except Exception as e:
+        # Если не удалось удалить, пытаемся скрыть его (изменить текст и убрать клавиатуру)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_text(
+                escape_markdown_v2(get_text("back_to_previous", language)),
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            logging.info(f"Скрыт текущий вопрос при возврате к предыдущему")
+        except Exception as e2:
+            logging.warning(f"Не удалось ни удалить, ни скрыть текущий вопрос: {e}, {e2}")
     
     # Удаляем последний ответ из списка ответов
     if progress["answers"]:
@@ -747,7 +769,6 @@ async def go_to_previous_question_inline(update: Update, context: CallbackContex
     question = questions[current_question]
     
     # Проверяем, есть ли сохраненный порядок вариантов для этого вопроса
-    # Для этого нам нужно сохранять порядок вариантов для каждого вопроса
     if "question_options" not in progress:
         progress["question_options"] = {}
     
@@ -769,9 +790,6 @@ async def go_to_previous_question_inline(update: Update, context: CallbackContex
     progress["current_mapping"] = letter_to_number
     progress["shuffled_options"] = shuffled_options
     
-    # Сохраняем обновленный прогресс
-    save_user_progress(user_id, progress)
-    
     # Создаем инлайн-клавиатуру с вариантами ответов по 2 в ряд
     keyboard = []
     for i in range(0, len(keyboard_letters), 2):
@@ -785,12 +803,45 @@ async def go_to_previous_question_inline(update: Update, context: CallbackContex
     if current_question > 0:
         keyboard.append([InlineKeyboardButton(get_text("back_to_previous", language), callback_data="back_to_previous")])
     
-    # Отправляем предыдущий вопрос
-    await query.message.reply_text(
-        formatted_text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    # Проверяем, есть ли сохраненный ID сообщения с предыдущим вопросом
+    if "previous_question_message_id" in progress and progress["previous_question_message_id"].get(str(current_question)):
+        # Если есть, пытаемся обновить существующее сообщение, добавив к нему клавиатуру
+        try:
+            previous_message_id = progress["previous_question_message_id"][str(current_question)]
+            await context.bot.edit_message_reply_markup(
+                chat_id=user_id,
+                message_id=previous_message_id,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            logging.info(f"Восстановлены кнопки для предыдущего вопроса (ID: {previous_message_id})")
+        except Exception as e:
+            logging.error(f"Не удалось восстановить кнопки для предыдущего вопроса: {e}")
+            # Если не удалось обновить существующее сообщение, отправляем новое
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=formatted_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            # Сохраняем ID отправленного сообщения
+            if "previous_question_message_id" not in progress:
+                progress["previous_question_message_id"] = {}
+            progress["previous_question_message_id"][str(current_question)] = message.message_id
+    else:
+        # Если нет сохраненного ID, отправляем новое сообщение
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=formatted_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        # Сохраняем ID отправленного сообщения
+        if "previous_question_message_id" not in progress:
+            progress["previous_question_message_id"] = {}
+        progress["previous_question_message_id"][str(current_question)] = message.message_id
+    
+    # Сохраняем обновленный прогресс
+    save_user_progress(user_id, progress)
     
     return ANSWERING_QUESTIONS
 
@@ -1550,27 +1601,24 @@ async def handle_admin_callback(update: Update, context: CallbackContext) -> Non
         # Удаляем кнопки из сообщения администратора
         await query.edit_message_reply_markup(reply_markup=None)
         
-        # Подтверждаем администратору, что сообщение отправлено
+        # Подтверждаем администратору, что сообщение отправлено (без использования Markdown)
         await query.message.reply_text(
-            f"{user_message}\n\nСообщение успешно отправлено.",
-            parse_mode=ParseMode.MARKDOWN_V2
+            f"{user_message}\n\nСообщение успешно отправлено."
         )
     except Exception as e:
         if "bot can't initiate conversation with a user" in str(e):
             # Пользователь не начал беседу с ботом
             await query.message.reply_text(
-                f"❌ Не удалось отправить сообщение пользователю\\. Он еще не начал диалог с ботом\\.\n\n"
-                f"*Необходимые действия:*\n"
-                f"1\\. Попросите пользователя перейти в @{BOT_USERNAME}\n"
-                f"2\\. Нажать START или отправить команду /start\n"
-                f"3\\. После этого повторите отправку ответа",
-                parse_mode=ParseMode.MARKDOWN_V2
+                f"❌ Не удалось отправить сообщение пользователю. Он еще не начал диалог с ботом.\n\n"
+                f"Необходимые действия:\n"
+                f"1. Попросите пользователя перейти в @{BOT_USERNAME}\n"
+                f"2. Нажать START или отправить команду /start\n"
+                f"3. После этого повторите отправку ответа"
             )
         else:
             # Другая ошибка
             await query.message.reply_text(
-                f"❌ Ошибка при отправке сообщения: {str(e)}",
-                parse_mode=ParseMode.MARKDOWN_V2
+                f"❌ Ошибка при отправке сообщения: {str(e)}"
             )
 
 async def handle_language_callback(update: Update, context: CallbackContext) -> int:
@@ -1612,7 +1660,7 @@ async def handle_language_callback(update: Update, context: CallbackContext) -> 
         logging.info(f"Отправлено сообщение о выбранном языке")
         
         # Отправляем приветственное сообщение
-        welcome_message = escape_markdown_v2(get_text("welcome", language))
+        welcome_message = get_text("welcome", language)
         logging.info(f"Подготовлено приветственное сообщение")
         
         # Отправляем приветственное сообщение
@@ -1621,16 +1669,18 @@ async def handle_language_callback(update: Update, context: CallbackContext) -> 
             parse_mode=ParseMode.MARKDOWN_V2
         )
         
-        # Создаем инлайн-клавиатуру с кнопкой для начала теста
+        # Создаем инлайн-клавиатуру с кнопкой для начала теста и кнопкой отмены
+        cancel_text = "Отмена" if language == "ru" else "Cancel"
         keyboard = [
             [InlineKeyboardButton(get_text("take_test", language), callback_data="start_test")],
+            [InlineKeyboardButton(cancel_text, callback_data="choice_no")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        logging.info(f"Создана инлайн-клавиатура с кнопкой для начала теста")
+        logging.info(f"Создана инлайн-клавиатура с кнопками для начала теста и отмены")
         
         # Отправляем сообщение о необходимости пройти тест
         await query.message.reply_text(
-            escape_markdown_v2(get_text("test_intro", language)),
+            get_text("test_intro", language),
             reply_markup=reply_markup,
             parse_mode=ParseMode.MARKDOWN_V2
         )
@@ -1692,22 +1742,23 @@ async def handle_choice_callback(update: Update, context: CallbackContext) -> in
                 row.append(InlineKeyboardButton(letter, callback_data=f"answer_{letter}"))
             keyboard.append(row)
         
-        # Сохраняем начальное состояние с маппингом
+        # Отправляем первый вопрос
+        message = await query.message.reply_text(
+            formatted_text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        # Сохраняем начальное состояние с маппингом и ID сообщения с первым вопросом
         save_user_progress(user_id, {
             "current_question": 0,
             "answers": [],
             "answer_stats": {"1": 0, "2": 0, "3": 0, "4": 0},
             "current_mapping": letter_to_number,
             "shuffled_options": shuffled_options,
-            "question_options": {"0": shuffled_options}  # Сохраняем порядок вариантов для первого вопроса
+            "question_options": {"0": shuffled_options},  # Сохраняем порядок вариантов для первого вопроса
+            "previous_question_message_id": {"0": message.message_id}  # Сохраняем ID сообщения с первым вопросом
         })
-        
-        # Отправляем первый вопрос
-        await query.message.reply_text(
-            formatted_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
         
         return ANSWERING_QUESTIONS
     
@@ -1727,6 +1778,41 @@ async def handle_choice_callback(update: Update, context: CallbackContext) -> in
         )
         return ConversationHandler.END
 
+async def finish_test_inline(update: Update, context: CallbackContext) -> int:
+    """
+    Завершает тест через инлайн-кнопку и предлагает пройти второй тест
+    """
+    query = update.callback_query
+    user_id = query.from_user.id
+    language = get_user_language(user_id)
+    
+    # Загружаем прогресс пользователя
+    progress = load_user_progress(user_id)
+    answers = progress.get("answers", [])
+    answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
+    
+    # Сохраняем статистику ответов для использования после прохождения второго теста
+    save_user_progress(user_id, {
+        "current_question": len(answers),
+        "answers": answers,
+        "answer_stats": answer_stats
+    })
+    
+    # Используем локализованную строку для сообщения о втором тесте
+    results_message = get_text("first_test_completed", language)
+    
+    # Отправляем сообщение с результатами пользователю
+    await query.message.reply_text(
+        results_message,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        disable_web_page_preview=True
+    )
+    
+    # Обновляем статус теста
+    update_test_status(user_id, "completed_first_test")
+    
+    return WAITING_FOR_SECOND_TEST
+
 def main() -> None:
     """
     Основная функция для запуска бота
@@ -1735,9 +1821,9 @@ def main() -> None:
         logging.info("Запуск бота")
         
         # Проверяем, что запущен только один экземпляр бота
-        if not check_single_instance():
-            logging.error("Бот уже запущен. Завершение работы.")
-            return
+        # if not check_single_instance():
+        #     logging.error("Бот уже запущен. Завершение работы.")
+        #     return
         
         # Инициализируем базу данных
         init_database()

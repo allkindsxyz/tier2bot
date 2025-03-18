@@ -29,6 +29,7 @@ The program is free, but we reserve the right to refuse if we believe you're not
     "yes_please": "Yes, please",
     "no_thanks": "No, thanks",
     "thanks_for_interest": "Thank you for your interest! If you want to take the test, just press /start",
+    "test_intro": "Please take the test to participate in the program\\.",
     
     # Testing
     "take_test": "📝 Take the test",
