@@ -136,8 +136,8 @@ At Tier 2, there is no rigid division into "right" and "wrong" paths - each leve
     "user_rejected": "✅ User Rejected (ID: {user_id})",
     
     # Messages to user after administrator's decision
-    "accepted_message": "🎊 *Congratulations\\! You have been accepted into the Welcome to Tier 2 program\\!*\n\nTo get started and coordinate the schedule, please sign up for an introductory meeting:\n{calendly_link}",
-    "rejected_message": "*Thank you for your interest in our program\\!*\n\nUnfortunately, at this stage, we cannot offer you participation in the program\\.\nWe recommend that you continue to work on yourself and try again after some time\\.",
+    "accepted_to_program": "🎊 *Congratulations\\! You have been accepted into the Welcome to Tier 2 program\\!*\n\nTo get started and arrange your schedule, please book an introductory meeting:\n{calendly_link}",
+    "rejected_from_program": "*Thank you for your interest in our program\\!*\n\nUnfortunately, at this stage, we cannot offer you participation in the program\\.\nWe recommend continuing to work on yourself and trying again after some time\\.",
     
     # Errors
     "error_sending_to_admin": "❌ Failed to send a response to the user\\. They have not yet started a dialogue with the bot\\.\n\n*Required actions:*\n1\\. Ask the user to go to @{bot_username}\n2\\. Press START or send the /start command\n3\\. After that, repeat sending the response with the same command",
