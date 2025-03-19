@@ -1888,12 +1888,6 @@ def main() -> None:
         application.add_handler(CommandHandler("respond", handle_admin_response))
         application.add_handler(CommandHandler("test", test_message))
         
-        # Добавляем обработчик для кнопок администратора
-        application.add_handler(MessageHandler(
-            filters.TEXT & filters.Regex(r"^(Принять|Отклонить) \d+$"),
-            handle_admin_decision
-        ))
-        
         # Добавляем обработчик для инлайн-кнопок администратора
         application.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^(accept|reject)_\d+$"))
         
