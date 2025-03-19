@@ -1185,11 +1185,13 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
                 result = cursor.fetchone()
                 conn.close()
                 
-                # Логируем полученные данные
-                logging.info(f"Данные из базы для пользователя {user_id}: {result}")
+                # Логируем полученные данные из базы данных
+                logging.info(f"SQL-запрос: SELECT answers, answer_stats FROM test_results WHERE user_id = {user_id}")
+                logging.info(f"Результат SQL-запроса для пользователя {user_id}: {result}")
                 
                 stats_text = ""
                 if result:
+                    logging.info(f"Результат найден для пользователя {user_id}")
                     answer_stats = json.loads(result[1])
                     
                     # Проверяем, что все ответы учтены в статистике
@@ -1242,6 +1244,11 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
                         count = answer_stats[answer_type]
                         percentage = (count / total_answers) * 100 if total_answers > 0 else 0
                         stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
+                        
+                    # Логируем сформированную статистику    
+                    logging.info(f"Сформированная статистика для сообщения: {stats_text}")
+                else:
+                    logging.warning(f"Не найдены данные в таблице test_results для пользователя {user_id}")
                 
                 # Создаем сообщение для администратора
                 admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
@@ -1332,8 +1339,13 @@ async def handle_photo(update: Update, context: CallbackContext) -> None:
             result = cursor.fetchone()
             conn.close()
             
+            # Логируем полученные данные из базы данных
+            logging.info(f"SQL-запрос в handle_photo: SELECT answers, answer_stats FROM test_results WHERE user_id = {user_id}")
+            logging.info(f"Результат SQL-запроса в handle_photo для пользователя {user_id}: {result}")
+            
             stats_text = ""
             if result:
+                logging.info(f"Результат в handle_photo найден для пользователя {user_id}")
                 answer_stats = json.loads(result[1])
                 
                 # Проверяем, что все ответы учтены в статистике
@@ -1386,23 +1398,32 @@ async def handle_photo(update: Update, context: CallbackContext) -> None:
                     count = answer_stats[answer_type]
                     percentage = (count / total_answers) * 100 if total_answers > 0 else 0
                     stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
-            
-            # Создаем сообщение для администратора
-            admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
-            
-            # Логируем сообщение перед отправкой
-            logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
-            
-            # Отправляем скриншот администратору
-            with open(file_path, "rb") as photo_file:
-                await context.bot.send_photo(
-                    chat_id=ADMIN_ID,
-                    photo=photo_file,
-                    caption=admin_message,
-                    reply_markup=admin_keyboard
-                )
-            
-            logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+                    
+                # Логируем сформированную статистику в handle_photo    
+                logging.info(f"Сформированная статистика в handle_photo для сообщения: {stats_text}")
+            else:
+                logging.warning(f"В handle_photo не найдены данные в таблице test_results для пользователя {user_id}")
+                
+                # В этом случае у нас нет ответов пользователя, поэтому нельзя пересчитать статистику
+                # Мы просто сообщаем об этом в логах и продолжаем без статистики
+                logging.error(f"Невозможно сформировать статистику - ответы пользователя не найдены в базе данных")
+                
+                # Создаем сообщение для администратора
+                admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+                
+                # Логируем сообщение перед отправкой
+                logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
+                
+                # Отправляем скриншот администратору
+                with open(file_path, "rb") as photo_file:
+                    await context.bot.send_photo(
+                        chat_id=ADMIN_ID,
+                        photo=photo_file,
+                        caption=admin_message,
+                        reply_markup=admin_keyboard
+                    )
+                
+                logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
         except Exception as e:
             logging.error(f"Ошибка при отправке уведомления администратору: {e}")
         
@@ -1482,8 +1503,13 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
             result = cursor.fetchone()
             conn.close()
             
+            # Логируем полученные данные из базы данных
+            logging.info(f"SQL-запрос в handle_document: SELECT answers, answer_stats FROM test_results WHERE user_id = {user_id}")
+            logging.info(f"Результат SQL-запроса в handle_document для пользователя {user_id}: {result}")
+            
             stats_text = ""
             if result:
+                logging.info(f"Результат в handle_document найден для пользователя {user_id}")
                 answer_stats = json.loads(result[1])
                 
                 # Проверяем, что все ответы учтены в статистике
@@ -1536,23 +1562,29 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
                     count = answer_stats[answer_type]
                     percentage = (count / total_answers) * 100 if total_answers > 0 else 0
                     stats_text += f"{answer_type}) {count} ({percentage:.0f}%)\n"
-            
-            # Создаем сообщение для администратора
-            admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
-            
-            # Логируем сообщение перед отправкой
-            logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
-            
-            # Отправляем скриншот администратору
-            with open(file_path, "rb") as photo_file:
-                await context.bot.send_photo(
-                    chat_id=ADMIN_ID,
-                    photo=photo_file,
-                    caption=admin_message,
-                    reply_markup=admin_keyboard
-                )
-            
-            logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+                
+                # Логируем сформированную статистику
+                logging.info(f"Сформированная статистика в handle_document для сообщения: {stats_text}")
+            else:
+                logging.warning(f"В handle_document не найдены данные в таблице test_results для пользователя {user_id}")
+                logging.error(f"Невозможно сформировать статистику - ответы пользователя не найдены в базе данных")
+                
+                # Создаем сообщение для администратора
+                admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+                
+                # Логируем сообщение перед отправкой
+                logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
+                
+                # Отправляем скриншот администратору
+                with open(file_path, "rb") as photo_file:
+                    await context.bot.send_photo(
+                        chat_id=ADMIN_ID,
+                        photo=photo_file,
+                        caption=admin_message,
+                        reply_markup=admin_keyboard
+                    )
+                
+                logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
         except Exception as e:
             logging.error(f"Ошибка при отправке уведомления администратору: {e}")
         
