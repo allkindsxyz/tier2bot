@@ -1263,15 +1263,38 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
                 logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
                 
                 # Отправляем скриншот администратору
-                with open(file_path, "rb") as photo_file:
-                    await context.bot.send_photo(
-                        chat_id=ADMIN_ID,
-                        photo=photo_file,
-                        caption=admin_message,
-                        reply_markup=admin_keyboard
-                    )
-                
-                logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+                try:
+                    # Проверяем существование файла
+                    if os.path.exists(file_path):
+                        logging.info(f"Файл {file_path} существует. Пытаемся отправить фото администратору (ID: {ADMIN_ID})")
+                        with open(file_path, "rb") as photo_file:
+                            await context.bot.send_photo(
+                                chat_id=ADMIN_ID,
+                                photo=photo_file,
+                                caption=admin_message,
+                                reply_markup=admin_keyboard
+                            )
+                        logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+                    else:
+                        logging.warning(f"Файл {file_path} не существует. Отправляем текстовое сообщение.")
+                        # Отправляем только текстовое сообщение без фото
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=admin_message,
+                            reply_markup=admin_keyboard
+                        )
+                        logging.info(f"Отправлено текстовое уведомление администратору о завершении теста пользователем {user_id}")
+                except Exception as e:
+                    logging.error(f"Ошибка при отправке уведомления администратору: {e}")
+                    # Пробуем отправить только текстовое сообщение без изображения и клавиатуры
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=admin_message
+                        )
+                        logging.info(f"Отправлено простое текстовое уведомление администратору о завершении теста пользователем {user_id}")
+                    except Exception as e2:
+                        logging.error(f"Не удалось отправить даже текстовое сообщение администратору: {e2}")
             except Exception as e:
                 logging.error(f"Ошибка при отправке уведомления администратору: {e}")
             
@@ -1421,15 +1444,38 @@ async def handle_photo(update: Update, context: CallbackContext) -> None:
                 logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
                 
                 # Отправляем скриншот администратору
-                with open(file_path, "rb") as photo_file:
-                    await context.bot.send_photo(
-                        chat_id=ADMIN_ID,
-                        photo=photo_file,
-                        caption=admin_message,
-                        reply_markup=admin_keyboard
-                    )
-                
-                logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+                try:
+                    # Проверяем существование файла
+                    if os.path.exists(file_path):
+                        logging.info(f"Файл {file_path} существует. Пытаемся отправить фото администратору (ID: {ADMIN_ID})")
+                        with open(file_path, "rb") as photo_file:
+                            await context.bot.send_photo(
+                                chat_id=ADMIN_ID,
+                                photo=photo_file,
+                                caption=admin_message,
+                                reply_markup=admin_keyboard
+                            )
+                        logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+                    else:
+                        logging.warning(f"Файл {file_path} не существует. Отправляем текстовое сообщение.")
+                        # Отправляем только текстовое сообщение без фото
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=admin_message,
+                            reply_markup=admin_keyboard
+                        )
+                        logging.info(f"Отправлено текстовое уведомление администратору о завершении теста пользователем {user_id}")
+                except Exception as e:
+                    logging.error(f"Ошибка при отправке уведомления администратору: {e}")
+                    # Пробуем отправить только текстовое сообщение без изображения и клавиатуры
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=admin_message
+                        )
+                        logging.info(f"Отправлено простое текстовое уведомление администратору о завершении теста пользователем {user_id}")
+                    except Exception as e2:
+                        logging.error(f"Не удалось отправить даже текстовое сообщение администратору: {e2}")
         except Exception as e:
             logging.error(f"Ошибка при отправке уведомления администратору: {e}")
         
@@ -1582,15 +1628,38 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
                 logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
                 
                 # Отправляем скриншот администратору
-                with open(file_path, "rb") as photo_file:
-                    await context.bot.send_photo(
-                        chat_id=ADMIN_ID,
-                        photo=photo_file,
-                        caption=admin_message,
-                        reply_markup=admin_keyboard
-                    )
-                
-                logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+                try:
+                    # Проверяем существование файла
+                    if os.path.exists(file_path):
+                        logging.info(f"Файл {file_path} существует. Пытаемся отправить фото администратору (ID: {ADMIN_ID})")
+                        with open(file_path, "rb") as photo_file:
+                            await context.bot.send_photo(
+                                chat_id=ADMIN_ID,
+                                photo=photo_file,
+                                caption=admin_message,
+                                reply_markup=admin_keyboard
+                            )
+                        logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
+                    else:
+                        logging.warning(f"Файл {file_path} не существует. Отправляем текстовое сообщение.")
+                        # Отправляем только текстовое сообщение без фото
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=admin_message,
+                            reply_markup=admin_keyboard
+                        )
+                        logging.info(f"Отправлено текстовое уведомление администратору о завершении теста пользователем {user_id}")
+                except Exception as e:
+                    logging.error(f"Ошибка при отправке уведомления администратору: {e}")
+                    # Пробуем отправить только текстовое сообщение без изображения и клавиатуры
+                    try:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=admin_message
+                        )
+                        logging.info(f"Отправлено простое текстовое уведомление администратору о завершении теста пользователем {user_id}")
+                    except Exception as e2:
+                        logging.error(f"Не удалось отправить даже текстовое сообщение администратору: {e2}")
         except Exception as e:
             logging.error(f"Ошибка при отправке уведомления администратору: {e}")
         
