@@ -30,7 +30,22 @@ load_dotenv()
 
 # Получаем значения из переменных окружения
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID'))
+
+# Более безопасная инициализация ADMIN_ID с проверкой и резервным значением
+try:
+    admin_id_str = os.getenv('ADMIN_ID')
+    if admin_id_str:
+        ADMIN_ID = int(admin_id_str)
+        logging.info(f"ADMIN_ID инициализирован из переменной окружения: {ADMIN_ID}")
+    else:
+        # Если переменная окружения отсутствует, используем значение по умолчанию
+        ADMIN_ID = 7994646552
+        logging.warning(f"Переменная окружения ADMIN_ID не найдена. Используется значение по умолчанию: {ADMIN_ID}")
+except ValueError:
+    # Если не удалось преобразовать строку в число, используем значение по умолчанию
+    logging.error(f"Не удалось преобразовать значение ADMIN_ID '{os.getenv('ADMIN_ID')}' в число. Используется значение по умолчанию.")
+    ADMIN_ID = 7994646552
+
 BOT_USERNAME = os.getenv('BOT_USERNAME')
 CALENDLY_LINK = os.getenv('CALENDLY_LINK')
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'tier2botadmin')
@@ -39,6 +54,7 @@ ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'tier2botadmin')
 ADMIN_IDS = [ADMIN_ID]
 
 # Создаем структуру директорий для данных
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = Path(__file__).resolve().parent  # Директория с bot.py
 DATA_DIR = BASE_DIR / "data"  # Директория для всех данных
 DB_DIR = DATA_DIR / "db"  # Директория для баз данных
@@ -49,6 +65,26 @@ LOCK_FILE = DATA_DIR / "bot.lock"
 # Создаем необходимые директории
 for dir_path in [DATA_DIR, DB_DIR, LOGS_DIR, TEMP_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
+
+# Функция для получения абсолютного пути к файлу с проверкой существования директории
+def get_absolute_path(relative_path):
+    """
+    Получает абсолютный путь к файлу и проверяет существование директории.
+    Если директория не существует, создает ее.
+    """
+    abs_path = os.path.join(BASE_DIR, relative_path)
+    directory = os.path.dirname(abs_path)
+    
+    # Проверяем существование директории
+    if not os.path.exists(directory):
+        try:
+            os.makedirs(directory, exist_ok=True)
+            logging.info(f"Создана директория: {directory}")
+        except Exception as e:
+            logging.error(f"Ошибка при создании директории {directory}: {e}")
+    
+    logging.info(f"Абсолютный путь к файлу: {abs_path}")
+    return abs_path
 
 # Определяем пути к файлам
 DATABASE_FILE = DB_DIR / "test_results.db"
@@ -1128,7 +1164,9 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
                 
                 # Скачиваем фото
                 file = await context.bot.get_file(file_id)
-                file_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+                # Используем нашу новую функцию для получения абсолютного пути
+                relative_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+                file_path = get_absolute_path(relative_path)
                 await file.download_to_drive(file_path)
                 
                 logging.info(f"Сохранен скриншот от пользователя {user_id}: {file_path}")
@@ -1149,7 +1187,9 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
                 
                 # Скачиваем документ
                 file = await context.bot.get_file(file_id)
-                file_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+                # Используем нашу новую функцию для получения абсолютного пути
+                relative_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+                file_path = get_absolute_path(relative_path)
                 await file.download_to_drive(file_path)
                 
                 logging.info(f"Сохранен скриншот от пользователя {user_id}: {file_path}")
@@ -1259,42 +1299,14 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
                 # Создаем сообщение для администратора
                 admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
                 
-                # Логируем сообщение перед отправкой
-                logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
+                # Отправляем уведомление администратору с использованием новой функции
+                await send_admin_notification(
+                    context=context,
+                    message_text=admin_message,
+                    photo_path=file_path,
+                    reply_markup=admin_keyboard
+                )
                 
-                # Отправляем скриншот администратору
-                try:
-                    # Проверяем существование файла
-                    if os.path.exists(file_path):
-                        logging.info(f"Файл {file_path} существует. Пытаемся отправить фото администратору (ID: {ADMIN_ID})")
-                        with open(file_path, "rb") as photo_file:
-                            await context.bot.send_photo(
-                                chat_id=ADMIN_ID,
-                                photo=photo_file,
-                                caption=admin_message,
-                                reply_markup=admin_keyboard
-                            )
-                        logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
-                    else:
-                        logging.warning(f"Файл {file_path} не существует. Отправляем текстовое сообщение.")
-                        # Отправляем только текстовое сообщение без фото
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=admin_message,
-                            reply_markup=admin_keyboard
-                        )
-                        logging.info(f"Отправлено текстовое уведомление администратору о завершении теста пользователем {user_id}")
-                except Exception as e:
-                    logging.error(f"Ошибка при отправке уведомления администратору: {e}")
-                    # Пробуем отправить только текстовое сообщение без изображения и клавиатуры
-                    try:
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=admin_message
-                        )
-                        logging.info(f"Отправлено простое текстовое уведомление администратору о завершении теста пользователем {user_id}")
-                    except Exception as e2:
-                        logging.error(f"Не удалось отправить даже текстовое сообщение администратору: {e2}")
             except Exception as e:
                 logging.error(f"Ошибка при отправке уведомления администратору: {e}")
             
@@ -1333,7 +1345,9 @@ async def handle_photo(update: Update, context: CallbackContext) -> None:
     # Скачиваем фото
     try:
         file = await context.bot.get_file(file_id)
-        file_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+        # Используем нашу новую функцию для получения абсолютного пути
+        relative_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+        file_path = get_absolute_path(relative_path)
         await file.download_to_drive(file_path)
         
         logging.info(f"Сохранен скриншот от пользователя {user_id}: {file_path}")
@@ -1432,50 +1446,19 @@ async def handle_photo(update: Update, context: CallbackContext) -> None:
                 logging.info(f"Сформированная статистика в handle_photo для сообщения: {stats_text}")
             else:
                 logging.warning(f"В handle_photo не найдены данные в таблице test_results для пользователя {user_id}")
-                
-                # В этом случае у нас нет ответов пользователя, поэтому нельзя пересчитать статистику
-                # Мы просто сообщаем об этом в логах и продолжаем без статистики
                 logging.error(f"Невозможно сформировать статистику - ответы пользователя не найдены в базе данных")
                 
-                # Создаем сообщение для администратора
-                admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            # Создаем сообщение для администратора
+            admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            
+            # Отправляем уведомление администратору с использованием новой функции
+            await send_admin_notification(
+                context=context,
+                message_text=admin_message,
+                photo_path=file_path,
+                reply_markup=admin_keyboard
+            )
                 
-                # Логируем сообщение перед отправкой
-                logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
-                
-                # Отправляем скриншот администратору
-                try:
-                    # Проверяем существование файла
-                    if os.path.exists(file_path):
-                        logging.info(f"Файл {file_path} существует. Пытаемся отправить фото администратору (ID: {ADMIN_ID})")
-                        with open(file_path, "rb") as photo_file:
-                            await context.bot.send_photo(
-                                chat_id=ADMIN_ID,
-                                photo=photo_file,
-                                caption=admin_message,
-                                reply_markup=admin_keyboard
-                            )
-                        logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
-                    else:
-                        logging.warning(f"Файл {file_path} не существует. Отправляем текстовое сообщение.")
-                        # Отправляем только текстовое сообщение без фото
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=admin_message,
-                            reply_markup=admin_keyboard
-                        )
-                        logging.info(f"Отправлено текстовое уведомление администратору о завершении теста пользователем {user_id}")
-                except Exception as e:
-                    logging.error(f"Ошибка при отправке уведомления администратору: {e}")
-                    # Пробуем отправить только текстовое сообщение без изображения и клавиатуры
-                    try:
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=admin_message
-                        )
-                        logging.info(f"Отправлено простое текстовое уведомление администратору о завершении теста пользователем {user_id}")
-                    except Exception as e2:
-                        logging.error(f"Не удалось отправить даже текстовое сообщение администратору: {e2}")
         except Exception as e:
             logging.error(f"Ошибка при отправке уведомления администратору: {e}")
         
@@ -1520,7 +1503,9 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
     try:
         file_id = document.file_id
         file = await context.bot.get_file(file_id)
-        file_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+        # Используем нашу новую функцию для получения абсолютного пути
+        relative_path = f"data/screenshots/{user_id}_{int(time.time())}.jpg"
+        file_path = get_absolute_path(relative_path)
         await file.download_to_drive(file_path)
         
         logging.info(f"Сохранен скриншот от пользователя {user_id}: {file_path}")
@@ -1621,45 +1606,17 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
                 logging.warning(f"В handle_document не найдены данные в таблице test_results для пользователя {user_id}")
                 logging.error(f"Невозможно сформировать статистику - ответы пользователя не найдены в базе данных")
                 
-                # Создаем сообщение для администратора
-                admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            # Создаем сообщение для администратора
+            admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            
+            # Отправляем уведомление администратору с использованием новой функции
+            await send_admin_notification(
+                context=context,
+                message_text=admin_message,
+                photo_path=file_path,
+                reply_markup=admin_keyboard
+            )
                 
-                # Логируем сообщение перед отправкой
-                logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
-                
-                # Отправляем скриншот администратору
-                try:
-                    # Проверяем существование файла
-                    if os.path.exists(file_path):
-                        logging.info(f"Файл {file_path} существует. Пытаемся отправить фото администратору (ID: {ADMIN_ID})")
-                        with open(file_path, "rb") as photo_file:
-                            await context.bot.send_photo(
-                                chat_id=ADMIN_ID,
-                                photo=photo_file,
-                                caption=admin_message,
-                                reply_markup=admin_keyboard
-                            )
-                        logging.info(f"Отправлено уведомление администратору о завершении теста пользователем {user_id}")
-                    else:
-                        logging.warning(f"Файл {file_path} не существует. Отправляем текстовое сообщение.")
-                        # Отправляем только текстовое сообщение без фото
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=admin_message,
-                            reply_markup=admin_keyboard
-                        )
-                        logging.info(f"Отправлено текстовое уведомление администратору о завершении теста пользователем {user_id}")
-                except Exception as e:
-                    logging.error(f"Ошибка при отправке уведомления администратору: {e}")
-                    # Пробуем отправить только текстовое сообщение без изображения и клавиатуры
-                    try:
-                        await context.bot.send_message(
-                            chat_id=ADMIN_ID,
-                            text=admin_message
-                        )
-                        logging.info(f"Отправлено простое текстовое уведомление администратору о завершении теста пользователем {user_id}")
-                    except Exception as e2:
-                        logging.error(f"Не удалось отправить даже текстовое сообщение администратору: {e2}")
         except Exception as e:
             logging.error(f"Ошибка при отправке уведомления администратору: {e}")
         
@@ -1940,6 +1897,68 @@ async def finish_test_inline(update: Update, context: CallbackContext) -> int:
     update_test_status(user_id, "completed_first_test")
     
     return WAITING_FOR_SECOND_TEST
+
+async def send_admin_notification(context, message_text, photo_path=None, reply_markup=None):
+    """
+    Надежная функция для отправки уведомлений администратору.
+    Пытается отправить сообщение различными способами в зависимости от доступности файла и других факторов.
+    
+    Args:
+        context: Контекст для доступа к методам бота
+        message_text: Текст сообщения для администратора
+        photo_path: Путь к фото для отправки (опционально)
+        reply_markup: Разметка для инлайн-клавиатуры (опционально)
+    """
+    # Логируем детали отправки
+    logging.info(f"Попытка отправки уведомления администратору (ID: {ADMIN_ID})")
+    logging.info(f"Текст сообщения: {message_text}")
+    logging.info(f"Путь к фото: {photo_path}")
+    
+    try:
+        # Пытаемся отправить фото с текстом, если путь к фото указан и файл существует
+        if photo_path and os.path.exists(photo_path):
+            logging.info(f"Файл {photo_path} существует. Отправляем фото с текстом администратору.")
+            try:
+                with open(photo_path, "rb") as photo_file:
+                    await context.bot.send_photo(
+                        chat_id=ADMIN_ID,
+                        photo=photo_file,
+                        caption=message_text,
+                        reply_markup=reply_markup
+                    )
+                logging.info(f"Успешно отправлено фото с текстом администратору.")
+                return True
+            except Exception as e:
+                logging.error(f"Ошибка при отправке фото администратору: {e}")
+                # Если не удалось отправить фото, пробуем отправить обычное сообщение
+        
+        # Отправляем только текстовое сообщение с разметкой
+        logging.info("Отправляем только текстовое сообщение администратору.")
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=message_text,
+                reply_markup=reply_markup
+            )
+            logging.info("Успешно отправлено текстовое сообщение администратору.")
+            return True
+        except Exception as e:
+            logging.error(f"Ошибка при отправке текстового сообщения с разметкой: {e}")
+            
+            # Последняя попытка - отправить простое текстовое сообщение без разметки
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=message_text
+                )
+                logging.info("Успешно отправлено простое текстовое сообщение администратору.")
+                return True
+            except Exception as e2:
+                logging.error(f"Не удалось отправить даже простое текстовое сообщение администратору: {e2}")
+                return False
+    except Exception as e:
+        logging.error(f"Критическая ошибка при отправке уведомления администратору: {e}")
+        return False
 
 def main() -> None:
     """
