@@ -1064,6 +1064,12 @@ async def finish_test(update: Update, context: CallbackContext) -> int:
         answers = progress.get("answers", [])
         answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
         
+        # Сохраняем результаты теста в базу данных
+        username = update.message.from_user.username or ""
+        first_name = update.message.from_user.first_name or ""
+        save_test_results(user_id, username, first_name, answers, answer_stats)
+        logging.info(f"Сохранены результаты теста для пользователя {user_id} в базу данных")
+        
         # Сохраняем статистику ответов для использования после прохождения второго теста
         save_user_progress(user_id, {
             "current_question": len(answers),
@@ -1837,6 +1843,12 @@ async def finish_test_inline(update: Update, context: CallbackContext) -> int:
     progress = load_user_progress(user_id)
     answers = progress.get("answers", [])
     answer_stats = progress.get("answer_stats", {"1": 0, "2": 0, "3": 0, "4": 0})
+    
+    # Сохраняем результаты теста в базу данных
+    username = query.from_user.username or ""
+    first_name = query.from_user.first_name or ""
+    save_test_results(user_id, username, first_name, answers, answer_stats)
+    logging.info(f"Сохранены результаты теста для пользователя {user_id} в базу данных")
     
     # Сохраняем статистику ответов для использования после прохождения второго теста
     save_user_progress(user_id, {
