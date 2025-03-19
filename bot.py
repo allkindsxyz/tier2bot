@@ -1021,6 +1021,9 @@ def format_test_results_message(user_id, language):
     result = cursor.fetchone()
     conn.close()
     
+    # Логируем полученные данные
+    logging.info(f"Данные из базы для пользователя {user_id}: {result}")
+    
     if not result:
         # Если результаты не найдены, возвращаем стандартное сообщение
         return get_text("results_received", language)
@@ -1182,6 +1185,9 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
                 result = cursor.fetchone()
                 conn.close()
                 
+                # Логируем полученные данные
+                logging.info(f"Данные из базы для пользователя {user_id}: {result}")
+                
                 stats_text = ""
                 if result:
                     answer_stats = json.loads(result[1])
@@ -1239,6 +1245,9 @@ async def handle_second_test_results(update: Update, context: CallbackContext) -
                 
                 # Создаем сообщение для администратора
                 admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+                
+                # Логируем сообщение перед отправкой
+                logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
                 
                 # Отправляем скриншот администратору
                 with open(file_path, "rb") as photo_file:
@@ -1380,6 +1389,9 @@ async def handle_photo(update: Update, context: CallbackContext) -> None:
             
             # Создаем сообщение для администратора
             admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            
+            # Логируем сообщение перед отправкой
+            logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
             
             # Отправляем скриншот администратору
             with open(file_path, "rb") as photo_file:
@@ -1527,6 +1539,9 @@ async def handle_document(update: Update, context: CallbackContext) -> None:
             
             # Создаем сообщение для администратора
             admin_message = f"📊 Новые результаты тестов!\n\nПользователь: {first_name} (@{username})\nID: {user_id}\n\nРезультаты первого теста:\n{stats_text}"
+            
+            # Логируем сообщение перед отправкой
+            logging.info(f"Подготовлено сообщение для администратора: {admin_message}")
             
             # Отправляем скриншот администратору
             with open(file_path, "rb") as photo_file:
